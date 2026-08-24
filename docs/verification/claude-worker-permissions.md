@@ -124,6 +124,22 @@ So in this configuration the classifier, not a network or filesystem jail, is wh
 Unproven: whether a store that enables a bash sandbox more forcefully would restrict those paths.
 That is a per-store question, and firstmate defers to the store by design, so it is not a firstmate guarantee.
 
+### Firstmate's own suites run unchanged inside a worker on this posture
+
+A worker launched with no autonomy flag, in a clone of this repo, ran a portable test lane end to end and reported it back:
+
+```sh
+bash bin/fm-test-run.sh --lane portable-parallel-1
+```
+
+```text
+FM_TEST_SUMMARY total=11 failed=0 skipped_gate=1 duration_ms=163716
+```
+
+No line started with `not ok`, and the single gated skip was `tests/fm-pi-primary-types.test.sh - skip: installed @earendil-works/pi-coding-agent package not found`, an absent optional package unrelated to permissions.
+The worker ran the lane twice plus two inspection commands and reported that no command was refused, blocked, or denied at any point.
+The lane covers the suites that shell out most heavily, including `fm-lint`, `fm-test-run`, `fm-grok-harness`, and `fm-review-diff`.
+
 ## Refreshing this record
 
 Re-run after a Claude Code upgrade that touches auto mode, permission modes, or sandboxing, and whenever the shipped rule counts move.
@@ -132,6 +148,7 @@ Re-run after a Claude Code upgrade that touches auto mode, permission modes, or 
 2. Drive one shipped `soft_deny` from a goal that does not name the action, and confirm the refusal text and a responsive pane rather than a dialog.
 3. Confirm the footer reads `auto mode on` for a flagless launch.
 4. Run `bash bin/fm-test-run.sh tests/fm-claude-harness.test.sh`, which pins the launch shape firstmate actually sends.
+5. Re-run a portable test lane inside a worker on this posture and confirm it stays green with no refusals.
 
 `tests/fm-claude-harness.test.sh` is the portable regression for the launch shape; it cannot observe classifier behavior, which is why this record carries the live evidence.
 The live steering-inbox doorbell guard exercises a real worker on this posture end to end; its dated claude result lives in [`runtime-backends.md`](runtime-backends.md) under "Steering-inbox doorbell".
