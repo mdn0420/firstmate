@@ -2,11 +2,20 @@
 # Behavior tests for bin/fm-bearings-board.sh: fail-closed payload validation,
 # slot-injection round-trip through the built page, bind-before-arm, and
 # idempotent re-arm of the stable board source.
+#
+# Plus the one thing about the board that only a browser can answer: which of
+# the two things a decision card can do with the captain's prose each of its
+# actions actually queues. That check drives the real built page in headless
+# Chrome and self-skips where no Chrome is installed.
 set -u
 
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
@@ -354,6 +363,187 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   pass "rebuild refreshes the board in place without double-arming"
 }
 
+# Chrome, wherever this host keeps it. FM_TEST_CHROME overrides the search.
+find_chrome() {
+  local candidate
+  if [ -n "${FM_TEST_CHROME:-}" ]; then
+    # An operator who named a binary meant it; a bad path is an error, not a skip.
+    [ -x "$FM_TEST_CHROME" ] || fail "FM_TEST_CHROME is not an executable: $FM_TEST_CHROME"
+    printf '%s\n' "$FM_TEST_CHROME"
+    return
+  fi
+  for candidate in google-chrome google-chrome-stable chromium chromium-browser; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return
+    fi
+  done
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+}
+
+# The captain gets two things to do with prose on a decision card, and only one
+# of them is his ruling. Everything downstream depends on the card queueing the
+# right one, and no shell fixture can prove that: it is the page's own behavior.
+#
+# So this drives the REAL built board in a real browser. The driver replaces
+# Lavish's queuePrompt with a recorder, works the cards the way the captain
+# would, and writes what each action queued back into the page for --dump-dom.
+test_a_card_queues_a_question_as_a_question_and_a_ruling_as_a_ruling() {
+  local home chrome data board driven report rc
+  chrome=$(find_chrome)
+  [ -n "$chrome" ] || { pass "no Chrome installed, skipping the board's browser behavior"; return; }
+  home=$(make_home card-actions)
+  data="$home/payload.json"
+  cat > "$data" <<'EOF'
+{
+  "schema": "fm-bearings-board.v1",
+  "home": "test-home",
+  "generated": "2026-08-24T00:00Z",
+  "prs_live": false,
+  "captains_call": [
+    {
+      "key": "sample-account-binding",
+      "type": "decision",
+      "repo": "sample",
+      "title": "Account binding",
+      "decide": "Which validation home?",
+      "options": [
+        { "value": "shared", "label": "Keep the shared home" },
+        { "value": "own", "label": "Give it its own home" }
+      ],
+      "allow_freeform": true
+    },
+    {
+      "key": "sample-options-only",
+      "type": "decision",
+      "repo": "sample",
+      "title": "Options only",
+      "decide": "Pick one",
+      "options": [
+        { "value": "a", "label": "A" },
+        { "value": "b", "label": "B" }
+      ]
+    }
+  ],
+  "underway": [],
+  "landed": [],
+  "charted": [],
+  "charted_more": 0
+}
+EOF
+  run_board "$home" build "$data" >/dev/null || fail "the card-actions board build failed"
+  board="$home/.lavish/bearings-board.html"
+  driven="$home/driven.html"
+  cat > "$home/driver.html" <<'EOF'
+<script>
+(function () {
+  var lines = [];
+  var queued = [];
+  window.lavish = { queuePrompt: function (text, opts) { queued.push(opts); } };
+  function button(form, label) {
+    var all = form.querySelectorAll("button");
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].textContent.indexOf(label) === 0) return all[i];
+    }
+    return null;
+  }
+  /* A card missing the box or the action reports that, rather than throwing and
+     leaving the run with nothing to read. */
+  function act(name, form, prose, label, option) {
+    queued = [];
+    var box = form.querySelector(".bb-freeform");
+    var action = button(form, label);
+    if (!box) { lines.push(name + " tag=no-prose-box"); return; }
+    if (!action) { lines.push(name + " tag=no-action"); return; }
+    if (option) form.querySelector("input[type=radio][value=" + option + "]").checked = true;
+    box.value = prose;
+    action.click();
+    if (!queued.length) { lines.push(name + " tag=none"); return; }
+    var q = queued[queued.length - 1];
+    var d = q.data || {};
+    lines.push(name + " tag=" + q.tag +
+      " question=" + (d.question || "-") + " answer=" + (d.answer || "-") +
+      " call=" + (d.call || "-") + " ask=" + (d.ask || "-"));
+  }
+  try {
+    var cards = document.querySelectorAll("#bb-call .bb-decision");
+    var freeform = cards[0].querySelector("form");
+    var optionsOnly = cards[1].querySelector("form");
+    act("typed-question", freeform, "What does its own validation home entail?", "Ask");
+    act("prose-ruling", freeform, "do A but skip the second step", "Queue answer");
+    act("option-with-note", freeform, "but only after the migration", "Queue answer", "own");
+    act("no-freeform-prose-ruling", optionsOnly, "just do whatever you think", "Queue answer");
+    act("no-freeform-question", optionsOnly, "what breaks if I pick B?", "Ask");
+  } catch (err) {
+    lines.push("driver-error " + err);
+  }
+  var out = document.createElement("pre");
+  out.id = "fm-probe";
+  out.textContent = lines.join("\n");
+  document.body.appendChild(out);
+})();
+</script>
+EOF
+  perl -e '
+    my ($board, $driver, $out) = @ARGV;
+    local $/;
+    open my $b, "<", $board or die "board: $!";
+    my $page = <$b>;
+    open my $d, "<", $driver or die "driver: $!";
+    my $script = <$d>;
+    die "board has no single body close\n" unless 1 == ($page =~ s/<\/body>/$script<\/body>/);
+    open my $o, ">", $out or die "out: $!";
+    print $o $page;
+  ' "$board" "$home/driver.html" "$driven" || fail "could not build the driven board page"
+
+  set +e
+  # No --user-data-dir. Pointing Chrome at a fresh profile directory here keeps
+  # it alive long past the dump, so the run only ends on the bound; the default
+  # headless profile handling dumps and exits in about two seconds.
+  fm_run_timed 60 "$chrome" --headless --disable-gpu --no-sandbox \
+    --dump-dom "file://$driven" > "$home/dump.html" 2>/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "driving the board in Chrome failed (exit $rc)"
+  report=$(perl -0777 -ne '
+    if (m{<pre id="fm-probe">(.*?)</pre>}s) {
+      my $t = $1;
+      $t =~ s/&lt;/</g; $t =~ s/&gt;/>/g; $t =~ s/&quot;/"/g;
+      $t =~ s/&#0?39;/'"'"'/g; $t =~ s/&amp;/&/g;
+      print $t;
+    }' "$home/dump.html")
+  [ -n "$report" ] || fail "the driven board produced no record of what its actions queued"
+
+  # The reproduction: the captain types a question instead of picking. It must
+  # reach firstmate as a question and carry no answer key at all, because the
+  # keyed-answer intake is what closes his call.
+  assert_contains "$report" \
+    "typed-question tag=question question=- answer=- call=sample-account-binding ask=What does its own validation home entail?" \
+    "a typed question was not queued as a question: $report"
+  # And prose the captain does offer as his ruling still closes the call.
+  assert_contains "$report" \
+    "prose-ruling tag=choice question=sample-account-binding answer=do A but skip the second step call=- ask=-" \
+    "a prose ruling was not queued as the captain's answer: $report"
+  assert_contains "$report" \
+    "option-with-note tag=choice question=sample-account-binding answer=own - but only after the migration call=- ask=-" \
+    "an annotated option was not queued as the captain's answer: $report"
+  # A card that never invited prose as a ruling refuses to treat it as one, and
+  # still lets the captain ask.
+  assert_contains "$report" "no-freeform-prose-ruling tag=none" \
+    "prose became a ruling on a card that allows no freeform answer: $report"
+  assert_contains "$report" \
+    "no-freeform-question tag=question question=- answer=- call=sample-options-only ask=what breaks if I pick B?" \
+    "a card that allows no freeform answer could not carry a question: $report"
+  pass "a decision card queues a question as a question and a ruling as a ruling"
+}
+
 test_build_refuses_a_template_without_exactly_one_slot() {
   local home data rc out
   home=$(make_home badslot)
@@ -377,3 +567,4 @@ test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
+test_a_card_queues_a_question_as_a_question_and_a_ruling_as_a_ruling
