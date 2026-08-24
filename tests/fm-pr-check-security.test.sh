@@ -3372,6 +3372,88 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# A key appended to a task's record after its merge poll was armed must not
+# disarm that poll, and a record that can be read two ways must still be
+# refused.
+# bin/fm-control.sh relaunch appends control_relaunch_tx to the end of the
+# record, so it lands after pr=, and the poll then stopped validating its own
+# identity: the merge was never reported and nothing said so. Every later key
+# has that same shape, so an arbitrary one is pinned here beside the exact one
+# that was hit, together with the ambiguity that must keep being refused
+# wherever it is placed.
+test_later_metadata_keys_keep_the_merge_poll_armed() {
+  local dir state url rc
+  url=https://github.com/o/r/pull/10
+  dir=$(make_case later-metadata-keys)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "arming the merge poll failed"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "the merge poll was not armed to begin with"
+
+  printf 'control_relaunch_tx=tx-0001\n' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the relaunch transaction key disarmed the merge poll"
+  printf 'some_later_key=whatever\n' >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an arbitrary later metadata key disarmed the merge poll"
+
+  # The chain that produced the silence: bin/fm-watch.sh and session start both
+  # run the non-executing migration first, and it is what quarantined and
+  # unarmed a poll whose identity no longer parsed. A record carrying later
+  # keys must survive it untouched.
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" > "$dir/migrate.out" 2>/dev/null \
+    || fail "the migration failed over a record carrying later keys"
+  [ ! -s "$dir/migrate.out" ] \
+    || fail "the migration acted on a healthy poll: $(cat "$dir/migrate.out")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the migration unarmed a healthy poll carrying later keys"
+  ! find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f 2>/dev/null | grep -q . \
+    || fail "the migration quarantined a healthy poll carrying later keys"
+
+  # The harm itself: with those keys recorded, the merge must still be reported
+  # and the poll must still retire.
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/merged.out" 2> "$dir/merged.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the watcher failed on a record carrying later keys: $(cat "$dir/merged.err")"
+  case "$(cat "$dir/merged.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "the merge went unreported for a record carrying later keys" ;;
+  esac
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "retirement removed canonical metadata"
+  grep -qxF 'control_relaunch_tx=tx-0001' "$state/task-a.meta" \
+    || fail "retirement removed a later metadata key"
+
+  # What a later key must not do is make the record readable two ways. A key
+  # repeated after pr= is still refused, because every consumer resolves a key
+  # with a trailing match and the poll must not stay bound to a record whose
+  # meaning depends on which occurrence a reader stops at.
+  dir=$(make_case ambiguous-after-pr)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" 'window=fm-task-a' "pr=$url" 'window=injected'
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a record repeating a key after pr= was accepted as unambiguous"
+
+  # Repetition is what is being tested, not a fixed set of permitted keys: the
+  # relay's own later keys stay acceptable, and a repeat of one does not - which
+  # naming those keys individually never caught.
+  dir=$(make_case relay-keys-unique)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" "window=fm-task-a" "pr=$url" \
+    'x_request=req-1' 'x_request_ts=1700000000' 'x_followups=0'
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "relay metadata recorded after pr= was refused"
+  printf 'x_followups=1\n' >> "$state/task-a.meta"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a repeated relay key was accepted as unambiguous"
+
+  pass "later metadata keys keep the merge poll armed while ambiguous records stay refused"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3408,3 +3490,4 @@ test_bootstrap_isolates_incomplete_poll_migration
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_later_metadata_keys_keep_the_merge_poll_armed

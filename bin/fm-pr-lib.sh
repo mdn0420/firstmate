@@ -285,8 +285,21 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# A key recorded after pr= is refused only when it repeats a key the record
+# already carries, rather than because it was not named here.
+# Repetition is the property this guard actually needs: every consumer resolves
+# a key with fm_meta_get's `tail -1`, so a key written twice makes one record
+# mean two different things depending on which occurrence a reader stops at,
+# and the poll must not stay bound to a record that can be read two ways.
+# Naming the permitted keys instead stood in for that and disarmed the poll
+# whenever any writer appended a key of its own after arming - silently, since
+# a poll that stops validating looks exactly like a PR that has not merged yet.
+# bin/fm-control.sh relaunch appending control_relaunch_tx is one such key and
+# the relay's x_ keys were another, which is why they once had to be named here
+# one by one; testing for repetition covers every later key at once.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line key value repeat pr_count=0 seen_pr=0 post_pr_invalid=0
+  local nl=$'\n' seen=$'\n'
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
@@ -295,6 +308,13 @@ fm_pr_metadata_identity_parse() {
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
+    # A key cannot contain a newline, so newlines delimit the seen-key set.
+    key=${line%%=*}
+    repeat=0
+    case "$seen" in
+      *"$nl$key$nl"*) repeat=1 ;;
+      *) seen=$seen$key$nl ;;
+    esac
     case "$line" in
       pr=*)
         pr_count=$((pr_count + 1))
@@ -315,10 +335,8 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        [ "$seen_pr" -eq 0 ] || [ "$repeat" -eq 0 ] || post_pr_invalid=1
         ;;
     esac
   done < "$file"
