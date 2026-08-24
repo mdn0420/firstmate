@@ -41,7 +41,7 @@ Use it for a domain that must run on a different Claude account from this home's
 It is per second mate on purpose, and there is no fleet-wide equivalent, because one global setting cannot express two mates on two accounts.
 An entry without the field parses and behaves exactly as it always has, inheriting the ambient store, so no existing line needs rewriting.
 
-Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
+Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive project-name list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
@@ -51,14 +51,14 @@ This release places whole secondmate homes remotely and never individual workers
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
-The `projects:` field is a non-exclusive clone list, not ownership.
+The `projects:` field is a non-exclusive list of project NAMES, not ownership, and never a filesystem path: a registered external checkout's location lives in that home's own `data/projects.md`.
 
 ## Charter and seed
 
 Scaffold a secondmate charter with:
 
 ```sh
-bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
+bin/fm-brief.sh <id> --secondmate {<project>[=<absolute-checkout-path>]...|--no-projects}
 ```
 
 The scaffold writes a charter brief instead of a task brief.
@@ -75,7 +75,7 @@ Preserve the generated charter sections unless the domain genuinely needs a hard
 Provision a local persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+bin/fm-home-seed.sh <id> <home|-> {<project>[=<absolute-checkout-path>]...|--no-projects}
 ```
 
 Provision a whole remote home through its configured SSH host with:
@@ -170,6 +170,22 @@ If validation, cloning, no-mistakes initialization, or registry update fails, ge
 Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
+
+### Registered external checkouts
+
+Name a project as `<project>=<absolute-checkout-path>` to REGISTER an existing checkout instead of cloning a second copy of it, which is the right shape when the captain already works in that clone and has not asked for a duplicate.
+Nothing is cloned and nothing is created under the home's `projects/`; the home's own `data/projects.md` records where that checkout lives, and every spawn for it takes that absolute path, exactly as `bin/fm-spawn.sh` has always accepted an arbitrary project directory.
+Both forms may be mixed in one list, but a project name may appear only once, so a project is never half cloned and half registered.
+A registered checkout must exist, be an ordinary directory rather than a symlink, be a git repository root, and sit outside this home, the secondmate home, and the firstmate repo; it must also already have a project registry record here, because there is no clone to read a delivery posture from and silently defaulting the captain's working copy to `no-mistakes` is the wrong failure.
+
+Firstmate never creates, moves, refreshes, or removes a registered checkout.
+Two operator consequences follow, and both belong in the charter you write:
+
+- It is NOT refreshed by the automatic clone sweep, which only walks `projects/`, so after a merge refresh it explicitly with `bin/fm-fleet-sync.sh <absolute-checkout-path>`, which accepts a path outside `projects/`.
+- It is unaffected by retirement, forced or not: it lives outside the home and is named nowhere teardown deletes from, so its uncommitted work survives (`bin/fm-teardown.sh` owns that boundary and refuses to discard any repository's own working checkout).
+
+Do not reach for `--no-projects` to avoid a clone.
+That flag asserts the domain's subject is the firstmate repo itself, which is false for a domain with real projects, and the assertion would then stand as a lie in that mate's own instructions.
 
 ## Record intake for an existing or inherited domain
 
@@ -273,3 +289,6 @@ It kills child windows, discards child work and state inside the secondmate home
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
 Relaunch and non-forced teardown remain outside that serialization.
 Never use `--force` unless the captain explicitly said to discard the work.
+
+Discarding child work only ever removes disposable task worktrees.
+A recorded child worktree that is a repository's OWN working checkout is refused rather than removed, forced or not, so a project registered as an existing external checkout survives retirement of the home that referenced it.

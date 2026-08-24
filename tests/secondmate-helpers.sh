@@ -179,6 +179,32 @@ seed_secondmate_home_marker() {
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
 }
 
+# Print a stable fingerprint of a checkout's working tree plus its git state:
+# every path outside .git with its content checksum, the porcelain status (so
+# uncommitted and untracked work is part of the fingerprint), and HEAD. Used to
+# prove a registered external checkout is left byte-identical across a teardown
+# that removes the home referencing it.
+# Scope is deliberate: it covers the captain's own files and work-in-progress,
+# not .git internals, because adding and later removing a crew's own linked
+# worktree legitimately touches the admin area and its own branch ref.
+checkout_fingerprint() {
+  local dir=$1
+  (
+    cd "$dir" || return 1
+    find . -path ./.git -prune -o -print | LC_ALL=C sort | while IFS= read -r path; do
+      if [ -f "$path" ] && [ ! -L "$path" ]; then
+        printf '%s\tfile\t%s\n' "$path" "$(cksum < "$path")"
+      elif [ -L "$path" ]; then
+        printf '%s\tlink\t%s\n' "$path" "$(readlink "$path")"
+      else
+        printf '%s\tdir\n' "$path"
+      fi
+    done
+    printf 'status\t%s\n' "$(git status --porcelain 2>&1 | LC_ALL=C sort | tr '\n' '|')"
+    printf 'head\t%s\n' "$(git rev-parse HEAD 2>&1)"
+  )
+}
+
 # Wait up to <limit> 0.1s ticks while <pid> stays alive. Returns 1 if it dies.
 wait_live() {
   local pid=$1 limit=${2:-30} i=0

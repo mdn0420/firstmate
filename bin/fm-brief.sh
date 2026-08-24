@@ -8,11 +8,15 @@
 # of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
-#        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --secondmate {<project>[=<checkout-path>]...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
-#   --secondmate writes a persistent secondmate charter. The project list
-#   is cloned into the secondmate home, while the natural-language scope
+#   --secondmate writes a persistent secondmate charter. A bare <project> is
+#   cloned into the secondmate home, while <project>=<absolute-checkout-path> names
+#   an EXISTING checkout the home only registers; the charter states which entry is
+#   which, so a registered checkout is never described as a clone.
+#   bin/fm-project-spec-lib.sh owns the accepted <project>[=<path>] shape.
+#   The natural-language scope
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
@@ -78,6 +82,8 @@ esac
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-project-spec-lib.sh
+. "$SCRIPT_DIR/fm-project-spec-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
 resolve_directory_input() {
@@ -196,16 +202,24 @@ EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
-SECONDMATE_PROJECTS=""
+SECONDMATE_SPECS=()
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
-  SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
+  SECONDMATE_SPECS+=("${POS[$idx]}")
   idx=$((idx + 1))
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
-  [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
+  [ "${#SECONDMATE_SPECS[@]}" -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
 else
-  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+  [ "${#SECONDMATE_SPECS[@]}" -gt 0 ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+fi
+SECONDMATE_NAMES=()
+SECONDMATE_EXTERNALS=()
+if [ "${#SECONDMATE_SPECS[@]}" -gt 0 ]; then
+  fm_project_spec_parse_list "${SECONDMATE_SPECS[@]}" \
+    || { echo "error: $FM_PROJECT_SPEC_ERROR" >&2; exit 1; }
+  SECONDMATE_NAMES=("${FM_PROJECT_SPEC_NAMES[@]}")
+  SECONDMATE_EXTERNALS=("${FM_PROJECT_SPEC_EXTERNALS[@]}")
 fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
@@ -213,8 +227,31 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
   PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
   PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
 else
-  PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
-  PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
+  # An external entry states the truth for that project: it is an existing
+  # checkout this home only registers, so the charter must never imply a clone
+  # under projects/ that does not exist.
+  PROJECT_CLONES_BODY=""
+  HAS_EXTERNAL=0
+  HAS_CLONE=0
+  for ((idx = 0; idx < ${#SECONDMATE_NAMES[@]}; idx++)); do
+    if [ -n "${SECONDMATE_EXTERNALS[$idx]}" ]; then
+      HAS_EXTERNAL=1
+      PROJECT_CLONES_BODY="${PROJECT_CLONES_BODY}${PROJECT_CLONES_BODY:+$'\n'}- ${SECONDMATE_NAMES[$idx]} - existing checkout at ${SECONDMATE_EXTERNALS[$idx]}, registered rather than cloned. Pass that absolute path to every spawn."
+    else
+      HAS_CLONE=1
+      PROJECT_CLONES_BODY="${PROJECT_CLONES_BODY}${PROJECT_CLONES_BODY:+$'\n'}- ${SECONDMATE_NAMES[$idx]}"
+    fi
+  done
+  if [ "$HAS_CLONE" -eq 1 ]; then
+    PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
+  else
+    PROJECT_CLONES_NOTE="The projects above are for work you supervise; they are not an exclusive ownership claim."
+  fi
+  if [ "$HAS_EXTERNAL" -eq 1 ]; then
+    PROJECT_CLONES_NOTE="$PROJECT_CLONES_NOTE
+An entry marked as an existing checkout is NOT cloned under \`projects/\` and is NOT refreshed by the automatic clone sweep, which only walks \`projects/\`: after a merge, refresh it explicitly with \`bin/fm-fleet-sync.sh <that absolute path>\`.
+It is also not yours to discard - never delete, reset, or clean it, and never run a destructive git command against it."
+  fi
 fi
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
