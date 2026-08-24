@@ -182,7 +182,7 @@ A local route may additionally carry the optional `claude-config-dir:` field, wh
 [`remote-secondmates.md`](remote-secondmates.md) owns current remote setup, operation, and safety behavior.
 Use `fm-home-seed.sh validate` to check the complete operational registry contract documented by the command itself.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
-Use `fm-home-seed.sh <id> - {<project>...|--no-projects}` to lease a fresh local firstmate worktree for the secondmate home.
+Use `fm-home-seed.sh <id> - {<project>[=<absolute-checkout-path>]...|--no-projects}` to lease a fresh local firstmate worktree for the secondmate home; the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#registered-external-checkouts) owns the registered-external-checkout form and its safety contract.
 For remote provisioning, including supplied project origins, follow [Remote second mates](remote-secondmates.md#provision-a-route).
 Use the deliberate `--no-projects` signal only for a firstmate-repo domain that needs no separate project clones.
 It cannot be combined with a project list, and omitting both still fails loudly.
