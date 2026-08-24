@@ -242,10 +242,16 @@ lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
+# This test only just entered the real-herdr-gated CI family (it previously
+# gate-skipped and never ran there), so the 100-attempt/10s budget below was
+# tuned solely against local dev latency. The shared CI runner's fork/exec
+# overhead is high enough that establishing the background sleep child can
+# take much longer in wall-clock terms, so the ceiling is generous; the
+# stability requirement itself (two consecutive clean samples) is unchanged.
 C_SHELL_PID=
 C_CHILD_ATTEMPT=0
 C_CHILD_STABLE=0
-while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
+while [ "$C_CHILD_ATTEMPT" -lt 300 ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
   if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
