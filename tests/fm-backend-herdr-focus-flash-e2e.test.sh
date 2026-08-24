@@ -238,21 +238,20 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+# Sent via the ATOMIC `pane run` (fm_backend_herdr_send_text_line's own
+# primitive, herdr.sh:2571) rather than a separate send-text + send-keys
+# enter pair. The two-step form is two independent CLI round trips with no
+# guarantee the Enter is processed only after the text lands; on a shared CI
+# runner that gap is exactly wide enough, often enough, for the Enter to
+# submit an empty line and strand the typed command unsubmitted forever -
+# indistinguishable from "the child just hasn't shown up yet" to the poll
+# loop below, which is why raising its budget (previously tried) never
+# helped: nothing was ever going to appear. `pane run` types and submits in
+# one call, closing that gap.
+lab pane run "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
-lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
-  || fail 'could not submit the Part C persistent-child command'
-# This test only just entered the real-herdr-gated CI family (it previously
-# gate-skipped and never ran there). A fixed attempt count here conflates
-# "how many polls" with "how much wall time", and each poll is one
-# out-of-process `lab pane process-info` round trip - on a shared CI runner
-# that per-call cost varies with runner contention, not just with the pane's
-# own fork/exec speed. A 300-attempt/0.1s-sleep budget (nominally 30s) still
-# undercounted real elapsed time on a loaded runner and starved the loop
-# before the background sleep child ever appeared. Bound this on elapsed
-# wall-clock time instead so the budget scales with actual per-call latency;
-# the stability requirement itself (two consecutive clean samples) is
-# unchanged.
+# The wall-clock deadline below is retained as a generous margin for slow
+# fork/exec on a loaded runner; it is no longer the primary defense.
 C_SHELL_PID=
 C_CHILD_STABLE=0
 C_CHILD_DEADLINE=$((SECONDS + 120))
