@@ -684,11 +684,6 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
-# Resolve the one verified running named-session socket path as an absolute
-# string. Requires JSON string type and non-empty length (jq -r is never used:
-# it would turn JSON null into the literal string "null"). Canonicalizes the
-# parent directory when that directory exists so symlink parents such as /tmp
-# -> /private/tmp cannot yield two lock identities for the same socket.
 # fm_backend_herdr_canonical_socket_path: normalize one absolute Unix-socket
 # path so two spellings of the same socket compare equal. Refuses a relative
 # or empty path. An unresolvable directory is left as-is rather than treated as
@@ -696,6 +691,10 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # literal path. Single owner for every socket-identity comparison in this
 # adapter (the presentation session lock and the launcher-identity same-session
 # proof both use it).
+# IDENTITY ONLY. Resolving symlinks can only lengthen the path, and AF_UNIX
+# caps a connect() path at roughly 104 bytes, so a canonical path is not
+# safe to hand to a socket client; use
+# fm_backend_herdr_presentation_session_socket_connect_path for that.
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
@@ -713,19 +712,58 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   printf '%s' "$socket"
 }
 
-fm_backend_herdr_presentation_session_socket_path() {  # <session>
-  local session=$1 sessions socket
+# fm_backend_herdr_presentation_session_reported_socket_path: the exact
+# absolute socket path herdr itself reports for the one verified running
+# named session, with no symlink resolution. Requires JSON string type and
+# non-empty length (jq -r is never used: it would turn JSON null into the
+# literal string "null"). This is the spelling herdr's own server bound, so
+# it is the one spelling a socket client is known to be able to connect to.
+fm_backend_herdr_presentation_session_reported_socket_path() {  # <session>
+  local session=$1 sessions
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
-  socket=$(printf '%s' "$sessions" | jq -er --arg want "$session" '
+  printf '%s' "$sessions" | jq -er --arg want "$session" '
     [.sessions[]?
       | select(.name == $want and .running == true)
       | select((.socket_path | type) == "string")
       | select((.socket_path | length) > 0)
       | .socket_path]
     | if length == 1 then .[0] else empty end
-  ' 2>/dev/null) || return 1
+  ' 2>/dev/null || return 1
+}
+
+# fm_backend_herdr_presentation_session_socket_path: the named session's
+# socket IDENTITY, canonicalized so symlink parents such as /tmp ->
+# /private/tmp cannot yield two identities for the same socket. Used for the
+# presentation session lock key and the launcher same-session proof, never as
+# a connect() target.
+fm_backend_herdr_presentation_session_socket_path() {  # <session>
+  local session=$1 socket
+  socket=$(fm_backend_herdr_presentation_session_reported_socket_path "$session") || return 1
   fm_backend_herdr_canonical_socket_path "$socket"
+}
+
+# fm_backend_herdr_presentation_session_socket_connect_path: the named
+# session's socket TRANSPORT path, for a client that must connect() to it.
+# Single owner of that choice, and deliberately separate from the identity
+# path above: canonicalizing resolves every symlink, which can only make the
+# path longer, and macOS caps an AF_UNIX path at 104 bytes. A home whose
+# herdr config directory is reached through symlinks (nix home-manager, a
+# dotfiles repo, stow) therefore canonicalizes a perfectly connectable path
+# into one connect() rejects with EINVAL, which silently costs the presentation
+# ordering and the focus-safe workspace removal their only transport.
+# The reported and canonical spellings name the same socket by construction,
+# so the shorter one is always at least as connectable; when both exceed the
+# platform limit the caller's own warning reports the failed connect.
+fm_backend_herdr_presentation_session_socket_connect_path() {  # <session>
+  local session=$1 reported canonical
+  reported=$(fm_backend_herdr_presentation_session_reported_socket_path "$session") || return 1
+  canonical=$(fm_backend_herdr_canonical_socket_path "$reported") || return 1
+  if [ "${#canonical}" -lt "${#reported}" ]; then
+    printf '%s' "$canonical"
+  else
+    printf '%s' "$reported"
+  fi
 }
 
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
@@ -1046,7 +1084,7 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
       printf 'plain\n'
       return 0
     fi
-    socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    socket=$(fm_backend_herdr_presentation_session_socket_connect_path "$session") || {
       echo "warning: herdr presentation cleanup found an ambiguous named session socket; closing without the focus-safe removal path" >&2
       printf 'plain\n'
       return 0
@@ -1070,7 +1108,7 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
         and ([.result.workspaces[].workspace_id] == $expected)
         and ([.result.workspaces[] | select(.focused == true) | .workspace_id] == [$focused])
       ' >/dev/null 2>&1; then
-      echo "warning: herdr presentation cleanup could not move the doomed workspace behind the focused one; closing without the focus-safe removal path" >&2
+      echo "warning: herdr presentation cleanup could not move the doomed workspace behind the focused one (mover status $move_status at $socket); closing without the focus-safe removal path" >&2
       printf 'plain\n'
       return 0
     fi
@@ -1394,7 +1432,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       return 0
       ;;
   esac
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+  socket=$(fm_backend_herdr_presentation_session_socket_connect_path "$session") || {
     echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
     return 0
   }

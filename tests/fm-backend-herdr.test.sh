@@ -1546,7 +1546,10 @@ test_projection_close_emptying_before_focus_repositions_then_uses_pane_death() {
   status=$?
   kill "$bgpid" 2>/dev/null || true; wait "$bgpid" 2>/dev/null || true
   [ "$status" -eq 0 ] || fail "repositioned emptying close should succeed through the pane-death path: $out"
-  [ "$(cat "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
+  # The mover is a socket client, so it must receive the spelling herdr itself
+  # reported, not the canonicalized identity one: resolving symlinks can only
+  # lengthen the path, and AF_UNIX rejects a connect() path near 104 bytes.
+  [ "$(cat "$dir/mover.log")" = "/tmp/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
     || fail "the repositioning move did not target the exact doomed workspace at the list length: $(cat "$dir/mover.log")"
   mover_line=$(grep -n $'pane\x1fprocess-info' "$log" | head -1 | cut -d: -f1)
   [ -n "$mover_line" ] || fail "repositioned close skipped the idle-shell proof"
@@ -2005,9 +2008,9 @@ assert_projection_close_failed_removal_rolls_back_the_reposition() {
   [ "$status" -ne 0 ] || fail "an unconfirmed removal must report failure: $out"
   [ "$(wc -l < "$dir/mover.log" | tr -d ' ')" = 2 ] \
     || fail "a failed removal did not roll the reposition back exactly once: $(cat "$dir/mover.log")"
-  [ "$(sed -n '1p' "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
+  [ "$(sed -n '1p' "$dir/mover.log")" = "/tmp/fmtest.sock"$'\t'"w1"$'\t'"3" ] \
     || fail "the reposition did not move the doomed workspace to the end: $(sed -n '1p' "$dir/mover.log")"
-  [ "$(sed -n '2p' "$dir/mover.log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w1"$'\t'"0" ] \
+  [ "$(sed -n '2p' "$dir/mover.log")" = "/tmp/fmtest.sock"$'\t'"w1"$'\t'"0" ] \
     || fail "the rollback did not restore the doomed workspace to its exact original position: $(sed -n '2p' "$dir/mover.log")"
   assert_not_contains "$(cat "$log")" $'tab\x1ffocus' "a failed rolled-back removal moved focus"
 }
@@ -2242,7 +2245,7 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "best-effort projection ordering must not fail the spawn"
   [ -z "$out" ] || fail "successful projection ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w5"$'\t'"2" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w5"$'\t'"2" ] \
     || fail "projection ordering did not move only the exact new response id to the owning-parent append index"
   assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "projection ordering called workspace close"
   assert_not_contains "$(cat "$log")" $'session\x1fdelete' "projection ordering called session delete"
@@ -2274,7 +2277,7 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "secondmate parent ordering must not fail the spawn: $out"
   [ -z "$out" ] || fail "successful secondmate ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"4" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w6"$'\t'"4" ] \
     || fail "secondmate child was not inserted after its parent block: $(cat "$mover_log")"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "secondmate ordering renamed a legacy child"
   pass "herdr presentation ordering: secondmate children append under their owning parent block"
@@ -2328,7 +2331,7 @@ SH
   status=$?
   [ "$status" -eq 0 ] || fail "intervening parent ordering must not fail the spawn: $out"
   [ -z "$out" ] || fail "legitimate intervening parent ordering emitted a warning: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w6"$'\t'"2" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w6"$'\t'"2" ] \
     || fail "intervening parent block prevented the owning-parent insertion: $(cat "$mover_log")"
   pass "herdr presentation ordering: intervening parent child blocks remain traversable"
 }
@@ -2355,7 +2358,7 @@ SH
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "w2\tw2:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest w3 firstmate' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "human-interleaved ordering must not fail: $out"
-  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
+  [ "$(cat "$mover_log")" = "/tmp/fmtest.sock"$'\t'"w3"$'\t'"2" ] \
     || fail "human spaces changed the move target or insert index: $(cat "$mover_log")"
   pass "herdr presentation ordering: only the exact new id moves; human spaces keep relative order"
 }
@@ -2572,6 +2575,155 @@ test_presentation_session_lock_path_rejects_malformed_socket() {
   [ "$status" -ne 0 ] || fail "missing socket_path must refuse the presentation lock path"
   [ -z "$path" ] || fail "missing socket_path returned a lock path: $path"
   pass "herdr presentation lock: null and missing socket paths fail closed"
+}
+
+# --- socket identity vs socket transport (AF_UNIX path-length regression) ---
+# Canonicalizing resolves every symlink, which can only make a path longer or
+# leave it alone, and AF_UNIX caps a connect() path near 104 bytes. A home whose
+# herdr config directory is a symlink into a longer real path (nix home-manager,
+# a dotfiles repo, stow) therefore had its perfectly connectable socket path
+# canonicalized into one connect() rejects, which silently cost the presentation
+# ordering and the focus-safe workspace removal their only transport.
+test_presentation_socket_connect_path_never_lengthens_the_transport_path() {
+  local base log resp fb seg deep deep_real reported identity connect long_link
+  local short_real short_real_real shortening shortening_connect probe probe_status=0 rc=0
+  # A SHORT base, deliberately not $TMP_ROOT: this case binds and connects a
+  # real AF_UNIX socket, and the per-suite temporary root is itself long enough
+  # to exhaust sun_path before the adapter's spelling could matter. mktemp keeps
+  # the name unique, so concurrent workers never collide. The presentation lock
+  # namespace this adapter owns already lives in the same shared directory.
+  base=$(mktemp -d /tmp/fmh.XXXXXX) || fail "could not create the short socket base"
+  mkdir -p "$base/responses"
+  log="$base/log"; resp="$base/responses"; : > "$log"
+  # A short spelling that resolves, through a symlink, to a real path far past
+  # any platform's sun_path limit (104 bytes on macOS, 108 on Linux). This is
+  # the shape a nix home-manager or dotfiles checkout gives ~/.config/herdr.
+  seg=paaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  deep="$base/$seg/$seg/$seg/$seg/$seg"
+  mkdir -p "$deep"
+  ln -s "$deep" "$base/s"
+  reported="$base/s/f.sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$reported\"}]}" > "$resp/1.out"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$reported\"}]}" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$base")
+  identity=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_socket_path fmtest' "$ROOT") || rc=$?
+  [ "$rc" -eq 0 ] || { rm -rf "$base"; fail "identity socket path resolution failed"; }
+  connect=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_socket_connect_path fmtest' "$ROOT") || rc=$?
+  [ "$rc" -eq 0 ] || { rm -rf "$base"; fail "transport socket path resolution failed"; }
+  deep_real=$(cd "$deep" && pwd -P) || { rm -rf "$base"; fail "could not resolve the real socket directory"; }
+
+  # The reverse direction: when resolving SHORTENS the path, transport takes the
+  # canonical spelling instead, so the rule is "shortest", not "never resolve".
+  short_real="$base/r"
+  mkdir -p "$short_real"
+  long_link="$base/a-considerably-longer-symlink-name"
+  ln -s "$short_real" "$long_link"
+  : > "$short_real/b.sock"
+  shortening="$long_link/b.sock"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$shortening\"}]}" > "$resp/3.out"
+  short_real_real=$(cd "$short_real" && pwd -P) || { rm -rf "$base"; fail "could not resolve the shortening socket directory"; }
+  shortening_connect=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_socket_connect_path fmtest' "$ROOT") || rc=$?
+  [ "$rc" -eq 0 ] || { rm -rf "$base"; fail "transport socket path resolution failed for the shortening case"; }
+
+  # Platform proof, not string comparison: one real server, bound through the
+  # short spelling exactly as herdr binds its own, must be reachable through the
+  # spelling this adapter hands a client and unreachable through the canonical
+  # one, which no sun_path can hold.
+  probe="$base/probe.py"
+  cat > "$probe" <<'PROBE'
+import socket, sys, threading
+
+transport, canonical = sys.argv[1], sys.argv[2]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(transport)
+server.listen(2)
+threading.Thread(target=server.accept, daemon=True).start()
+status = 0
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+try:
+    client.connect(transport)
+except OSError as error:
+    sys.stderr.write("transport connect(%s) failed: %r\n" % (transport, error))
+    status = 1
+finally:
+    client.close()
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.settimeout(5)
+try:
+    client.connect(canonical)
+    sys.stderr.write("canonical connect(%s) unexpectedly succeeded\n" % canonical)
+    status = 1
+except OSError:
+    pass
+finally:
+    client.close()
+    server.close()
+sys.exit(status)
+PROBE
+  python3 "$probe" "$reported" "$deep_real/f.sock" 2>"$base/probe.err" || probe_status=$?
+  rm -rf "$base"
+
+  # Every assertion runs on captured values, so no failure can leak the base.
+  [ "${#deep_real}" -gt 108 ] \
+    || fail "this layout does not exceed any sun_path limit, so the case is vacuous: ${#deep_real} bytes"
+  [ "$identity" = "$deep_real/f.sock" ] \
+    || fail "the identity path must stay fully resolved: $identity"
+  [ "$connect" = "$reported" ] \
+    || fail "the transport path must keep the shorter reported spelling: $connect"
+  [ "${#connect}" -lt "${#identity}" ] \
+    || fail "the transport path must never be longer than the identity path: $connect"
+  [ "${#short_real_real}" -lt "${#long_link}" ] \
+    || fail "the shortening layout is vacuous: $short_real_real"
+  [ "$shortening_connect" = "$short_real_real/b.sock" ] \
+    || fail "the transport path must take the canonical spelling when it is shorter: $shortening_connect"
+  [ "$probe_status" -eq 0 ] \
+    || fail "a real AF_UNIX client disagreed with the adapter's chosen spelling"
+  pass "herdr presentation socket: identity canonicalizes, transport keeps the shortest connectable spelling"
+}
+
+# The defect this split exists to prevent: the workspace mover is a socket
+# CLIENT, so the call site must hand it the connectable spelling, never the
+# canonicalized identity one.
+test_projection_order_hands_the_mover_the_connectable_socket_spelling() {
+  local dir log resp fb mover deep reported out status
+  dir="$TMP_ROOT/projection-order-socket-spelling"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
+  deep="$dir/a-considerably-longer-real-directory-name/nested"
+  mkdir -p "$deep"
+  ln -s "$deep" "$dir/s"
+  : > "$deep/fmtest.sock"
+  reported="$dir/s/fmtest.sock"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"wH","label":"2ndmate-alpha"},{"workspace_id":"w2","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$reported\"}]}" > "$resp/4.out"
+  # 5-6 and 7-8: the exact-focus snapshot taken before the move and the restore
+  # backstop's re-read after it.
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t1","focused":true},{"workspace_id":"wH","active_tab_id":"wH:t1","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t1","focused":false}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/6.out"
+  cp "$resp/5.out" "$resp/7.out"
+  cp "$resp/6.out" "$resp/8.out"
+  cat > "$mover" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" > "$FM_FAKE_MOVER_SOCKET"
+exit 3
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_SOCKET="$dir/socket-arg" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w2 firstmate' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "ordering must stay best-effort: $out"
+  [ -s "$dir/socket-arg" ] || fail "the ordering path never invoked the workspace mover: $out"
+  [ "$(cat "$dir/socket-arg")" = "$reported" ] \
+    || fail "the mover was handed a non-connectable socket spelling: $(cat "$dir/socket-arg")"
+  pass "herdr presentation ordering: the workspace mover receives the connectable socket spelling"
 }
 
 test_projection_order_rejects_malformed_socket() {
@@ -4519,6 +4671,8 @@ test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
+test_presentation_socket_connect_path_never_lengthens_the_transport_path
+test_projection_order_hands_the_mover_the_connectable_socket_spelling
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding

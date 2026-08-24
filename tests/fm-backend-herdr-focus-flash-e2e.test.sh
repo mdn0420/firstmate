@@ -193,7 +193,8 @@ B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus
   || fail "the mitigation changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
 [ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
   || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
-grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
+grep -q '^pane process-info' "$CALL_LOG" \
+  || fail "the idle-shell proof never ran, so the plan fell back before it; adapter said: ${B_OUT:-<nothing>}"
 pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
 
 if [ "$STEAL_LIVE" = 1 ]; then
@@ -325,9 +326,9 @@ fi
 # close must have been issued.
 C_PROOF_CALLS=$(grep -c '^pane process-info' "$C_CALL_LOG" || true)
 [ "$C_PROOF_CALLS" -eq "$C_PROOF_POLLS" ] \
-  || fail "Part C did not exhaust the idle-shell proof ($C_PROOF_CALLS of $C_PROOF_POLLS samples); the persistent child did not block it"
+  || fail "Part C did not exhaust the idle-shell proof ($C_PROOF_CALLS of $C_PROOF_POLLS samples); the persistent child did not block it, or the plan fell back before the proof; adapter said: ${C_OUT:-<nothing>}"
 grep -q '^pane close' "$C_CALL_LOG" \
-  || fail 'Part C never reached the plain explicit close, so the fallback branch was not exercised'
+  || fail "Part C never reached the plain explicit close, so the fallback branch was not exercised; adapter said: ${C_OUT:-<nothing>}"
 pass 'fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close'
 
 C_AFTER=$(focus_snapshot) || fail 'could not capture the Part C post-close focus'
