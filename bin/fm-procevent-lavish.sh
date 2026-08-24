@@ -6,6 +6,7 @@
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh messages <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html>
@@ -34,8 +35,18 @@
 # intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
 # just an ephemeral discussion format that happens to carry answers.
 #
-# Only rows tagged `choice` are read. A freeform captain message is prose that may
+# It reads only rows tagged `choice`. A freeform captain message is prose that may
 # contain anything, and must never be able to forge a decision key.
+#
+# `messages` is the other half of that split and the read side of everything the
+# captain typed that is NOT a ruling: rows tagged `question` (a board card's
+# explicit "ask before deciding") and rows tagged `message` (prose typed into the
+# review's own conversation panel). It closes nothing and feeds no intake, so a
+# captain call can never be closed by text he did not offer as his decision;
+# handling what it prints is firstmate's judgment, exactly like any other
+# captured result. Deciding WHICH of the two a piece of prose is belongs to the
+# captain at the moment he types it, never to this adapter: nothing here reads
+# prose to guess intent.
 #
 # It wraps ONLY the currently published interface, verified against 0.1.45:
 #   Usage: lavish-axi poll <html-file> [--agent-reply "..."]
@@ -81,7 +92,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+# Print the leading header block, however long it grows, so help can never drift
+# out of a hand-maintained line range.
+usage() {
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
+  exit 2
+}
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
@@ -303,26 +319,41 @@ cmd_terminal() {
   return 1
 }
 
-# Print `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice the
-# captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
-# a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
+# One reader for the published response's queued-feedback block, shared by the
+# two commands that read it. The response frames that block as a
+# `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
 # quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
-# `choice`. A freeform `message` row is captain prose and is deliberately never a
-# source of decision keys. A row that does not carry both a slug-shaped `question`
-# and an `answer` inside its `Context data:` block is skipped, so a deck that does
-# not key its forms by decision key simply yields nothing.
-# The question cap is 128 so any task id fits, including the long legacy
-# `<origin>-decision-<key>` identities pre-collapse decks still carry; the
-# security property is the slug SHAPE, which is unchanged.
-cmd_answers() {
-  local file=${1-}
-  [ -n "$file" ] || usage
-  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+# rather than assuming a fixed column. <mode> selects the projection:
+#
+#   answers   `key<TAB>answer<TAB>label[<TAB>mode]` for every structured choice
+#             the captain submitted; the optional mode column relays the card's
+#             declared close mode (`done` or `release`) to the keyed-answer
+#             intake. Only rows whose `tag` field is `choice` are taken, and a
+#             row that does not carry both a slug-shaped `question` and an
+#             `answer` inside its `Context data:` block is skipped, so a deck
+#             that does not key its forms by decision key simply yields nothing.
+#             The question cap is 128 so any task id fits, including the long
+#             legacy `<origin>-decision-<key>` identities pre-collapse decks
+#             still carry; the security property is the slug SHAPE.
+#   messages  `call<TAB>text<TAB>label` for every piece of captain prose that is
+#             not a ruling: a `question` row, which a board card emits when the
+#             captain explicitly asks before deciding, and a `message` row, which
+#             is prose typed into the conversation panel. A `question` row's
+#             `call` is the slug-shaped captain-held task id the card declared,
+#             so firstmate knows which call the captain is asking about; it is a
+#             routing hint only, and nothing downstream closes on it. A `message`
+#             row NEVER yields a call, because its prose is the captain's own
+#             free text and the same text that must not forge a decision key
+#             must not forge a call reference either. Neither row can reach the
+#             keyed-answer intake, which reads `choice` rows and nothing else.
+#
+# Prose keeps every byte it arrived with, apart from control characters folded
+# to spaces so one row stays one line; losing the captain's words is worse than
+# reformatting them, so nothing here truncates.
+read_prompt_rows() {  # <result-file> <mode>
   perl -MJSON::PP -e '
     use strict; use warnings;
-    my ($path) = @ARGV;
+    my ($path, $mode) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -355,33 +386,71 @@ cmd_answers() {
       }
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "choice";
-      my $prompt = $f{prompt};
-      next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
-      my $ctx = $1;
-      my $data = eval { decode_json($ctx) };
-      next unless ref($data) eq "HASH";
-      my $key = $data->{question};
-      my $answer = $data->{answer};
-      next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
-      my $mode = "";
-      if (exists $data->{close}) {
-        next if !defined($data->{close}) || ref($data->{close})
-          || ($data->{close} ne "done" && $data->{close} ne "release");
-        $mode = $data->{close};
-      }
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
-      next unless length $answer && length($answer) <= 512;
+      my $tag = defined $f{tag} ? $f{tag} : "";
       my $label = defined $f{text} ? $f{text} : "";
-      s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
+      my $ctx;
+      if (defined $f{prompt} && $f{prompt} =~ /Context data:\s*(\{.*\})/s) {
+        my $decoded = eval { decode_json($1) };
+        $ctx = $decoded if ref($decoded) eq "HASH";
+      }
+      if ($mode eq "answers") {
+        next unless $tag eq "choice";
+        next unless $ctx;
+        my $key = $ctx->{question};
+        my $answer = $ctx->{answer};
+        next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
+        my $close = "";
+        if (exists $ctx->{close}) {
+          next if !defined($ctx->{close}) || ref($ctx->{close})
+            || ($ctx->{close} ne "done" && $ctx->{close} ne "release");
+          $close = $ctx->{close};
+        }
+        next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+        next unless length $answer && length($answer) <= 512;
+        s/[\x00-\x1f\x7f]/ /g for ($answer, $label);
+        $label = substr($label, 0, 512);
+        # A re-answered form appears again later in the queue; the last submission wins.
+        if (defined $seen{$key}) { $out[$seen{$key}] = undef }
+        $seen{$key} = scalar @out;
+        push @out, length $close ? "$key\t$answer\t$label\t$close" : "$key\t$answer\t$label";
+        next;
+      }
+      next unless $tag eq "question" || $tag eq "message";
+      my ($call, $text) = ("", "");
+      if ($tag eq "question") {
+        next unless $ctx;
+        my $declared = $ctx->{call};
+        my $ask = $ctx->{ask};
+        next if !defined($ask) || ref($ask) || !length $ask;
+        $text = $ask;
+        $call = $declared
+          if defined($declared) && !ref($declared)
+            && $declared =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      } else {
+        $text = defined $f{prompt} ? $f{prompt} : "";
+        next unless length $text;
+      }
+      s/[\x00-\x1f\x7f]/ /g for ($text, $label);
       $label = substr($label, 0, 512);
-      # A re-answered form appears again later in the queue; the last submission wins.
-      if (defined $seen{$key}) { $out[$seen{$key}] = undef }
-      $seen{$key} = scalar @out;
-      push @out, length $mode ? "$key\t$answer\t$label\t$mode" : "$key\t$answer\t$label";
+      push @out, "$call\t$text\t$label";
     }
     print "$_\n" for grep { defined } @out;
-  ' "$file"
+  ' "$1" "$2"
+}
+
+require_result_file() {  # <result-file>
+  [ -n "${1-}" ] || usage
+  [ -f "$1" ] && [ ! -L "$1" ] || die "result file does not exist: ${1-}"
+}
+
+cmd_answers() {
+  require_result_file "${1-}"
+  read_prompt_rows "$1" answers
+}
+
+cmd_messages() {
+  require_result_file "${1-}"
+  read_prompt_rows "$1" messages
 }
 
 case "${1-}" in
@@ -392,6 +461,7 @@ case "${1-}" in
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  messages)  shift; cmd_messages "$@" ;;
   ''|-h|--help|help) usage ;;
   *) die "unknown command: $1" ;;
 esac

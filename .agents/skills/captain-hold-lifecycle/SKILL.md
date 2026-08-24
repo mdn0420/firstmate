@@ -30,7 +30,9 @@ When the captain says "later", that is an answer too: re-hold with `tasks-axi ho
 "A keyed answer closes its matching captain-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a captain answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or closes anything itself.
 Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-answer source feeds it once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
 An unbound source and a key that names no captain-held task both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the direct command above.
+A channel may also carry captain prose that is not an answer at all, and that prose feeds nothing: whether a written sentence is the captain's ruling or his question is declared by the captain where he writes it, and is never inferred from the words downstream.
 A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
+A call closed when the captain never ruled is repaired by reopening it first, with `tasks-axi reopen <id>` and then `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, because `hold` refuses a closed task.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 

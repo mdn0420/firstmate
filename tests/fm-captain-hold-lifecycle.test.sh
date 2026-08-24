@@ -621,6 +621,95 @@ EOF
   pass "main-home and secondmate-home captain calls remain correctly routed"
 }
 
+# A board decision card offers the captain two things to do with prose, and only
+# one of them is a ruling. This drives both through the real runner, in one
+# capture, exactly as a board result arrives.
+#
+# The regression: a typed QUESTION used to arrive as the card's answer and close
+# the captain's own call. It must now close nothing, while still reaching
+# firstmate with the captain's exact words and still waking him.
+test_board_question_never_closes_but_a_prose_ruling_still_does() {
+  local home sid artifact result out show queue
+  home=$(make_home board-question)
+  tasks_in "$home" add sample-account-binding "Choose the sample account binding" \
+    --kind ship --repo sample >/dev/null || fail "could not create the questioned call"
+  run_captain "$home" hold sample-account-binding \
+    --reason "captain binding choice pending" >/dev/null \
+    || fail "could not hold the questioned call"
+  tasks_in "$home" add sample-cadence-call "Choose the sample refresh cadence" \
+    --kind ship --repo sample >/dev/null || fail "could not create the ruled call"
+  run_captain "$home" hold sample-cadence-call \
+    --reason "captain cadence choice pending" >/dev/null \
+    || fail "could not hold the ruled call"
+
+  artifact="$home/.lavish/bearings-board.html"
+  mkdir -p "$home/.lavish"
+  printf '<h1>Bearings board</h1>\n' > "$artifact"
+  fm_fake_exit0 "$home/fakebin" lavish-axi
+  sid=$(run_lavish "$home" source-id "$artifact") || fail "could not derive the board source id"
+  run_captain "$home" bind "$sid" >/dev/null \
+    || fail "could not bind the board source to the keyed-answer intake"
+
+  # Exactly the two rows a decision card emits: "Ask before deciding" queues a
+  # `question` row carrying call/ask, and "Queue answer" queues a `choice` row
+  # carrying question/answer.
+  result="$home/board.result"
+  cat > "$result" <<'EOF'
+session:
+  file: /bearings-board.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "2","Question before deciding - Account binding: What does giving UTM its own validation home entail?\n\nContext data:\n{\n  \"call\": \"sample-account-binding\",\n  \"ask\": \"What does giving UTM its own validation home entail?\"\n}","form:nth-of-type(1)",question,"Account binding -> question"
+  "3","Captain's Call answer - Refresh cadence: do A but skip the second step\n\nContext data:\n{\n  \"question\": \"sample-cadence-call\",\n  \"answer\": \"do A but skip the second step\"\n}","form:nth-of-type(2)",choice,"Refresh cadence -> do A but skip the second step"
+EOF
+
+  # The real runner: capture, feed the keyed-answer intake, publish the wake.
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" register lavish "$sid" -- cat "$result" >/dev/null \
+    || fail "could not register the board source"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" start "$sid" >/dev/null 2>&1
+
+  show=$(tasks_in "$home" show sample-account-binding --full)
+  assert_contains "$show" "state: queued" "a typed question closed the captain's own call"
+  assert_contains "$show" "held: yes" "a typed question released the captain's own call"
+  assert_not_contains "$show" "Resolution mode:" \
+    "a typed question was recorded as the captain's decision"
+
+  out=$(run_lavish "$home" answers "$home/state/procevent-inbox/$sid.1.result") \
+    || fail "could not read the captured answers"
+  assert_not_contains "$out" "sample-account-binding" \
+    "a typed question reached the keyed-answer intake as an answer"
+  assert_contains "$out" "sample-cadence-call	do A but skip the second step" \
+    "a prose ruling did not reach the keyed-answer intake"
+
+  # Mis-filing the captain's input would be bad; losing it would be worse.
+  out=$(run_lavish "$home" messages "$home/state/procevent-inbox/$sid.1.result") \
+    || fail "could not read the captured captain prose"
+  assert_contains "$out" "sample-account-binding	What does giving UTM its own validation home entail?" \
+    "the captain's question did not reach firstmate against the call it is about"
+  assert_not_contains "$out" "do A but skip the second step" \
+    "a ruling was also reported as unresolved captain prose"
+
+  assert_present "$home/state/procevent-inbox/$sid.1.result" "the board result was not captured"
+  assert_absent "$home/state/procevent-inbox/$sid.1.handled" \
+    "the board result was retired before firstmate handled the captain's question"
+  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queue" "procevent lavish $sid" \
+    "the captain's question did not wake firstmate"
+
+  show=$(tasks_in "$home" show sample-cadence-call --full)
+  assert_contains "$show" "state: done" "a prose ruling left the captain's call open"
+  assert_contains "$show" "Resolution mode: answered" "the prose ruling did not record its close path"
+  assert_contains "$show" "Answer: do A but skip the second step" \
+    "the prose ruling did not record the captain's exact words"
+  pass "a board question closes nothing and still reaches firstmate, while a prose ruling still closes the call"
+}
+
 # The one keyed-answer intake, fed through the real process-event runner by a
 # fixture channel that knows nothing about captain holds: task-id keys close at
 # answer time, a card-declared release mode frees held work, freeform prose can
@@ -1179,6 +1268,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
+test_board_question_never_closes_but_a_prose_ruling_still_does
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
