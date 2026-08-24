@@ -496,6 +496,18 @@ Part C is the case the suite could not reach before: a doomed pane whose shell h
 On 0.7.5 that fallback exposed a bounded four-sample wrong-focus window and restored the anchor exactly; on 0.8.0 the same fallback exposed none, which is why default-on projection is floored at 0.8.0 rather than mitigated further below it.
 The suite also cross-checks its own Part A measurement against the floor classifier on whatever release it runs, so a drifted protocol-to-release mapping fails there rather than silently gating on the wrong thing.
 
+The same suite ran again on 2026-08-24 against Herdr 0.8.0 protocol 19 on macOS aarch64, on a home whose `~/.config/herdr` is a symlink into a longer real path, the ordinary shape of a nix home-manager or dotfiles checkout:
+
+```sh
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
+  tests/fm-backend-herdr-focus-flash-e2e.test.sh
+```
+
+That host shape is what separates a socket's identity spelling from its transport spelling, and it is why the two have separate owners in the adapter.
+`herdr session list --json` reported the named lab socket at 75 bytes, canonicalizing to 98, and the default fleet session at 39 bytes canonicalizing to 62.
+A lab session name long enough to carry the canonical form past macOS's 104-byte `AF_UNIX` limit made `connect()` fail with `AF_UNIX path too long`, so the `workspace.move` transport exited 2, the emptying-close plan fell back to the plain explicit close, and the lone-idle-shell proof never ran at all.
+Presentation ordering and focus-safe removal therefore hand the mover the shortest spelling of the socket, while the session lock key and the launcher same-session proof keep the canonical one.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.

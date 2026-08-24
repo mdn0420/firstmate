@@ -193,7 +193,8 @@ B_AFTER=$(focus_snapshot) || fail 'could not capture the Part B post-close focus
   || fail "the mitigation changed the exact focused workspace or tab ($B_BEFORE -> $B_AFTER)"
 [ "$(ws_order)" = "$B_SURVIVOR_ORDER" ] \
   || fail "the mitigation left a lasting workspace order change ($B_SURVIVOR_ORDER -> $(ws_order))"
-grep -q '^pane process-info' "$CALL_LOG" || fail 'the idle-shell proof never ran'
+grep -q '^pane process-info' "$CALL_LOG" \
+  || fail "the idle-shell proof never ran, so the plan fell back before it; adapter said: ${B_OUT:-<nothing>}"
 pass 'mitigation: every in-operation sample preserved exact focus while the doomed workspace was removed'
 
 if [ "$STEAL_LIVE" = 1 ]; then
@@ -237,22 +238,33 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+#
+# Send `cd /` and the child as TWO SEPARATE SIMPLE COMMANDS. Backgrounding a
+# compound list (`cd / && sleep 3000 &`) runs it in a subshell, and whether
+# that subshell collapses into the final command is shell-dependent: dash and
+# zsh exec through it, bash does not and leaves the shell parenting a `bash`
+# subshell instead. Herdr picks the pane shell from $SHELL, so this varies by
+# host, not by code: a macOS pane is zsh and a bare container pane is sh (both
+# collapse, both pass), while GitHub Actions exports SHELL=/bin/bash and the
+# child is a subshell. A lone `sleep 3000 &` is a simple command and parents
+# the same way under every one of those shells.
+lab pane run "$C_DOOMED_PANE" 'cd /' >/dev/null \
+  || fail 'could not move the Part C doomed pane out of the worktree'
+lab pane run "$C_DOOMED_PANE" 'sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
-lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
-  || fail 'could not submit the Part C persistent-child command'
+# Generous margin for slow fork/exec on a loaded runner.
 C_SHELL_PID=
-C_CHILD_ATTEMPT=0
 C_CHILD_STABLE=0
-while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
+C_CHILD_DEADLINE=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$C_CHILD_DEADLINE" ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
-  if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
-    $1 == parent {
-      command = $2
-      sub(/^.*\//, "", command)
-      if (command == "sleep") found = 1
-    }
+  # Any direct child, regardless of name - this is exactly the condition the
+  # adapter's own idle-shell proof tests (fm_backend_herdr_pane_idle_shell_sample
+  # counts `$2 == shell` without inspecting the name). Matching on a specific
+  # command name would assert something stricter than the contract under test.
+  if [ -n "$C_SHELL_PID" ] && ps -axo ppid= | awk -v parent="$C_SHELL_PID" '
+    $1 == parent { found = 1 }
     END { exit(found ? 0 : 1) }
   '; then
     C_CHILD_STABLE=$((C_CHILD_STABLE + 1))
@@ -262,9 +274,8 @@ while [ "$C_CHILD_ATTEMPT" -lt 100 ]; do
     C_SHELL_PID=
   fi
   sleep 0.1
-  C_CHILD_ATTEMPT=$((C_CHILD_ATTEMPT + 1))
 done
-[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent sleep child process'
+[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent child process'
 
 C_CALL_LOG="$TMP_ROOT/call-c.log"
 C_FOCUS_SAMPLES="$TMP_ROOT/focus-c.samples"
@@ -325,9 +336,9 @@ fi
 # close must have been issued.
 C_PROOF_CALLS=$(grep -c '^pane process-info' "$C_CALL_LOG" || true)
 [ "$C_PROOF_CALLS" -eq "$C_PROOF_POLLS" ] \
-  || fail "Part C did not exhaust the idle-shell proof ($C_PROOF_CALLS of $C_PROOF_POLLS samples); the persistent child did not block it"
+  || fail "Part C did not exhaust the idle-shell proof ($C_PROOF_CALLS of $C_PROOF_POLLS samples); the persistent child did not block it, or the plan fell back before the proof; adapter said: ${C_OUT:-<nothing>}"
 grep -q '^pane close' "$C_CALL_LOG" \
-  || fail 'Part C never reached the plain explicit close, so the fallback branch was not exercised'
+  || fail "Part C never reached the plain explicit close, so the fallback branch was not exercised; adapter said: ${C_OUT:-<nothing>}"
 pass 'fallback: a doomed pane holding a persistent child exhausts the proof and takes the plain explicit close'
 
 C_AFTER=$(focus_snapshot) || fail 'could not capture the Part C post-close focus'
