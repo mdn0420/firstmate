@@ -243,15 +243,20 @@ lab pane send-text "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
 lab pane send-keys "$C_DOOMED_PANE" enter >/dev/null \
   || fail 'could not submit the Part C persistent-child command'
 # This test only just entered the real-herdr-gated CI family (it previously
-# gate-skipped and never ran there), so the 100-attempt/10s budget below was
-# tuned solely against local dev latency. The shared CI runner's fork/exec
-# overhead is high enough that establishing the background sleep child can
-# take much longer in wall-clock terms, so the ceiling is generous; the
-# stability requirement itself (two consecutive clean samples) is unchanged.
+# gate-skipped and never ran there). A fixed attempt count here conflates
+# "how many polls" with "how much wall time", and each poll is one
+# out-of-process `lab pane process-info` round trip - on a shared CI runner
+# that per-call cost varies with runner contention, not just with the pane's
+# own fork/exec speed. A 300-attempt/0.1s-sleep budget (nominally 30s) still
+# undercounted real elapsed time on a loaded runner and starved the loop
+# before the background sleep child ever appeared. Bound this on elapsed
+# wall-clock time instead so the budget scales with actual per-call latency;
+# the stability requirement itself (two consecutive clean samples) is
+# unchanged.
 C_SHELL_PID=
-C_CHILD_ATTEMPT=0
 C_CHILD_STABLE=0
-while [ "$C_CHILD_ATTEMPT" -lt 300 ]; do
+C_CHILD_DEADLINE=$((SECONDS + 120))
+while [ "$SECONDS" -lt "$C_CHILD_DEADLINE" ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
   if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
@@ -269,7 +274,6 @@ while [ "$C_CHILD_ATTEMPT" -lt 300 ]; do
     C_SHELL_PID=
   fi
   sleep 0.1
-  C_CHILD_ATTEMPT=$((C_CHILD_ATTEMPT + 1))
 done
 [ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent sleep child process'
 
