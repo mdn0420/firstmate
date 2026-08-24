@@ -58,6 +58,12 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Child-work discard only ever removes DISPOSABLE task worktrees: a removal
+# target that is a repository's own main working checkout is refused, forced or
+# not. A project a secondmate registered as an existing external checkout
+# (bin/fm-home-seed.sh) therefore survives retirement of the home that
+# referenced it: it lives outside the home and is named nowhere teardown deletes
+# from, so the checkout and its uncommitted work are left untouched.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1183,6 +1189,24 @@ EOF
   return 1
 }
 
+# True when <target> is a repository's OWN main working tree rather than a
+# linked worktree. `git worktree list` includes the main working tree, so the
+# registered-worktree check alone would happily authorize removing a project's
+# real checkout. That is survivable while every project lives as a disposable
+# clone inside the home being retired, but a secondmate may now register an
+# EXISTING external checkout (bin/fm-home-seed.sh), so the same authorization
+# would reach the captain's own working copy. A linked worktree's git dir is
+# <common>/worktrees/<name>; the main working tree's git dir IS the common dir.
+child_worktree_is_main_working_tree() {
+  local target=$1 gitdir commondir abs_gitdir abs_commondir
+  gitdir=$(cd "$target" 2>/dev/null && git rev-parse --git-dir 2>/dev/null) || return 1
+  commondir=$(cd "$target" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$gitdir" ] && [ -n "$commondir" ] || return 1
+  abs_gitdir=$(cd "$target" 2>/dev/null && cd "$gitdir" 2>/dev/null && pwd -P) || return 1
+  abs_commondir=$(cd "$target" 2>/dev/null && cd "$commondir" 2>/dev/null && pwd -P) || return 1
+  [ "$abs_gitdir" = "$abs_commondir" ]
+}
+
 inspectable_git_worktree() {
   local target=$1 top
   [ -n "$target" ] || return 1
@@ -1882,6 +1906,10 @@ validate_child_worktree_for_removal() {
   fi
   if ! worktree_registered_for_project "$project" "$target"; then
     echo "REFUSED: unsafe child worktree removal target $target is not a git worktree for ${project:-the recorded project}" >&2
+    return 1
+  fi
+  if child_worktree_is_main_working_tree "$abs_target"; then
+    echo "REFUSED: unsafe child worktree removal target $target is a repository's own working checkout, not a disposable task worktree" >&2
     return 1
   fi
   printf '%s\n' "$abs_target"

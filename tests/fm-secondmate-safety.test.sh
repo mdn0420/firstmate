@@ -1027,6 +1027,349 @@ test_home_seed_refuses_local_only_project() {
   pass "home seeding refuses local-only projects"
 }
 
+# --- registered external checkouts ------------------------------------------
+# A secondmate may name a project as <name>=<absolute-path> to REGISTER an
+# existing checkout instead of cloning its own copy. Nothing is created under
+# the home's projects/, so the checkout stays entirely outside everything
+# teardown is allowed to remove.
+
+# Build a main home with one cloned project (alpha) and one existing external
+# checkout (ext) carrying uncommitted work. Echoes the external checkout path.
+make_external_checkout_fixture() {
+  local home=$1 name=$2 mode=$3 external
+  # TMPDIR can carry a trailing slash; the seed records the collapsed form of
+  # whatever path it is given, so build the same form here.
+  external=$(printf '%s\n' "$TMP_ROOT/external-checkouts/$name" | sed 's://*:/:g')
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/$name-alpha.git"
+  fm_git_init_commit "$external"
+  fm_git_add_origin "$external" "$TMP_ROOT/remotes/$name-external.git"
+  printf 'captain work in progress\n' > "$external/UNCOMMITTED.txt"
+  printf 'edited by the captain\n' >> "$external/README.md"
+  {
+    printf -- '- alpha [direct-PR] - alpha project (added 2026-06-22)\n'
+    printf -- '- %s [%s] - external project (added 2026-06-22)\n' "$name" "$mode"
+  } > "$home/data/projects.md"
+  printf '%s\n' "$external"
+}
+
+test_home_seed_registers_external_checkout_without_cloning() {
+  local home subhome external out
+  home="$TMP_ROOT/external-seed-home"
+  subhome="$TMP_ROOT/external-seed-subhome"
+  external=$(make_external_checkout_fixture "$home" extproj direct-PR)
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='external domain' FM_SECONDMATE_SCOPE='external domain work' \
+    "$ROOT/bin/fm-home-seed.sh" extmate "$subhome" "extproj=$external") \
+    || fail "seed refused a registered external checkout"
+  printf '%s\n' "$out" | grep -F "home=$(cd "$subhome" && pwd -P)" >/dev/null \
+    || fail "seed did not report the external-checkout subhome"
+
+  # Nothing cloned, nothing created for it under the home at all.
+  [ -z "$(ls -A "$subhome/projects" 2>/dev/null)" ] || fail "seed cloned a registered external checkout into the home"
+
+  # The home's own project registry records where the checkout actually lives.
+  assert_grep "- extproj [direct-PR] - external project" "$subhome/data/projects.md" \
+    "seed dropped the external project's registered posture"
+  assert_grep "NOT cloned under projects/: work runs against the existing checkout at $external" \
+    "$subhome/data/projects.md" "seed did not record the external checkout path"
+  assert_grep "the automatic clone sweep only walks projects/" "$subhome/data/projects.md" \
+    "seed did not record that external checkouts are not swept"
+
+  # The routing registry keeps a plain name list for both forms.
+  assert_grep 'projects: extproj;' "$home/data/secondmates.md" "registry projects field lost the external project name"
+  assert_no_grep "projects: extproj=$external" "$home/data/secondmates.md" \
+    "registry projects field leaked a filesystem path into the name list"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null \
+    || fail "registry validation failed after an external-checkout seed"
+
+  # The charter states the truth rather than the project-less firstmate-subject
+  # wording, and never claims the checkout was cloned.
+  assert_grep "- extproj - existing checkout at $external, registered rather than cloned" \
+    "$subhome/data/charter.md" "charter did not describe the external checkout truthfully"
+  assert_no_grep 'None. This is a project-less domain' "$subhome/data/charter.md" \
+    "charter falsely claimed a project-less firstmate-subject domain"
+
+  # Seeding never touched the captain's checkout.
+  assert_present "$external/UNCOMMITTED.txt" "seed removed uncommitted work from the external checkout"
+  pass "home seeding registers an external checkout instead of cloning it"
+}
+
+test_home_seed_mixes_cloned_and_external_projects() {
+  local home subhome external
+  home="$TMP_ROOT/external-mixed-home"
+  subhome="$TMP_ROOT/external-mixed-subhome"
+  external=$(make_external_checkout_fixture "$home" mixedproj direct-PR)
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='mixed domain' FM_SECONDMATE_SCOPE='mixed domain work' \
+    "$ROOT/bin/fm-home-seed.sh" mixedmate "$subhome" alpha "mixedproj=$external" >/dev/null \
+    || fail "seed refused a mixed cloned and external project list"
+
+  [ -d "$subhome/projects/alpha/.git" ] || fail "mixed seed did not clone the cloned entry"
+  [ ! -e "$subhome/projects/mixedproj" ] || fail "mixed seed created a projects/ entry for the external checkout"
+  assert_grep "- mixedproj [direct-PR] - external project" "$subhome/data/projects.md" "mixed seed lost the external record"
+  assert_no_grep "- alpha [direct-PR] - alpha project (added 2026-06-22) NOT cloned" "$subhome/data/projects.md" \
+    "mixed seed marked the cloned entry as an external checkout"
+  assert_grep 'projects: alpha, mixedproj;' "$home/data/secondmates.md" "mixed seed lost a project from the registry list"
+  assert_grep '- alpha' "$subhome/data/charter.md" "mixed charter lost the cloned entry"
+  assert_grep "- mixedproj - existing checkout at $external" "$subhome/data/charter.md" "mixed charter lost the external entry"
+  pass "home seeding handles a mixed cloned and external project list"
+}
+
+test_home_seed_refuses_duplicate_project_entries() {
+  local home subhome external err
+  home="$TMP_ROOT/external-duplicate-home"
+  subhome="$TMP_ROOT/external-duplicate-subhome"
+  err="$TMP_ROOT/external-duplicate.err"
+  external=$(make_external_checkout_fixture "$home" dupproj direct-PR)
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='dup domain' \
+    "$ROOT/bin/fm-home-seed.sh" dupmate "$subhome" dupproj "dupproj=$external" >/dev/null 2>"$err"; then
+    fail "seed accepted the same project as both a clone and an external checkout"
+  fi
+  grep -F 'project dupproj is listed more than once' "$err" >/dev/null \
+    || fail "seed did not explain the duplicate project entry"
+  [ ! -e "$subhome" ] || fail "seed created a subhome before refusing a duplicate project entry"
+  pass "home seeding refuses a project listed as both a clone and an external checkout"
+}
+
+test_home_seed_refuses_unsafe_external_checkouts() {
+  local home subhome external err case_name spec expected
+  home="$TMP_ROOT/external-unsafe-home"
+  external=$(make_external_checkout_fixture "$home" unsafeproj direct-PR)
+  err="$TMP_ROOT/external-unsafe.err"
+  mkdir -p "$TMP_ROOT/external-unsafe-plain" "$external/subdir"
+  ln -s "$external" "$TMP_ROOT/external-unsafe-link"
+  git -C "$external" worktree add --quiet -b external-unsafe-linked-worktree-branch \
+    "$TMP_ROOT/external-unsafe-linked-worktree" >/dev/null
+
+  for case_name in empty relative missing traversal symlink non-git subdirectory inside-active-home inside-repo linked-worktree; do
+    subhome="$TMP_ROOT/external-unsafe-subhome-$case_name"
+    case "$case_name" in
+      # An unset shell variable expanding to nothing is the realistic way to
+      # pass an empty path, and must refuse rather than read as a bare name.
+      empty) spec='unsafeproj='; expected='external checkout path is empty' ;;
+      relative) spec='unsafeproj=relative/path'; expected='must be an absolute path' ;;
+      missing) spec="unsafeproj=$TMP_ROOT/external-unsafe-absent"; expected='does not exist' ;;
+      traversal) spec="unsafeproj=$external/../unsafeproj"; expected='contains traversal components' ;;
+      symlink) spec="unsafeproj=$TMP_ROOT/external-unsafe-link"; expected='must not be a symlink' ;;
+      non-git) spec="unsafeproj=$TMP_ROOT/external-unsafe-plain"; expected='is not a git repository' ;;
+      subdirectory) spec="unsafeproj=$external/subdir"; expected='must be a repository root' ;;
+      inside-active-home) spec="unsafeproj=$home/projects/alpha"; expected='must be outside the active firstmate home' ;;
+      inside-repo) spec="unsafeproj=$ROOT"; expected='must be outside the firstmate repo' ;;
+      linked-worktree) spec="unsafeproj=$TMP_ROOT/external-unsafe-linked-worktree"; expected='not a linked worktree' ;;
+    esac
+    if FM_HOME="$home" FM_SECONDMATE_CHARTER='unsafe domain' \
+      "$ROOT/bin/fm-home-seed.sh" "unsafe$case_name" "$subhome" "$spec" >/dev/null 2>"$err"; then
+      fail "seed accepted an unsafe external checkout ($case_name)"
+    fi
+    grep -F "$expected" "$err" >/dev/null \
+      || fail "seed did not explain the unsafe external checkout ($case_name): $(cat "$err")"
+    [ ! -e "$subhome" ] || fail "seed created a subhome before refusing an unsafe external checkout ($case_name)"
+  done
+  pass "home seeding refuses empty, relative, missing, traversing, symlinked, non-repository, nested, in-home, and linked-worktree external checkouts"
+}
+
+test_home_seed_refuses_external_checkout_inside_the_secondmate_home() {
+  local home subhome external err
+  home="$TMP_ROOT/external-inhome-home"
+  subhome="$TMP_ROOT/external-inhome-subhome"
+  err="$TMP_ROOT/external-inhome.err"
+  make_external_checkout_fixture "$home" inhomeproj direct-PR >/dev/null
+  git clone --quiet "$ROOT" "$subhome"
+  external="$subhome/projects/inhomeproj"
+  fm_git_init_commit "$external"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='in-home domain' \
+    "$ROOT/bin/fm-home-seed.sh" inhomemate "$subhome" "inhomeproj=$external" >/dev/null 2>"$err"; then
+    fail "seed registered an external checkout that lives inside the secondmate home"
+  fi
+  grep -F 'must be outside the secondmate home' "$err" >/dev/null \
+    || fail "seed did not explain the in-home external checkout refusal: $(cat "$err")"
+  assert_present "$external/README.md" "refusal disturbed the checkout it refused"
+  pass "home seeding refuses an external checkout inside the secondmate home"
+}
+
+test_home_seed_refuses_unregistered_and_local_only_external_checkouts() {
+  local home subhome external err
+  home="$TMP_ROOT/external-posture-home"
+  err="$TMP_ROOT/external-posture.err"
+  external=$(make_external_checkout_fixture "$home" postureproj local-only)
+
+  subhome="$TMP_ROOT/external-posture-localonly-subhome"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='posture domain' \
+    "$ROOT/bin/fm-home-seed.sh" posturemate "$subhome" "postureproj=$external" >/dev/null 2>"$err"; then
+    fail "seed registered a local-only external checkout"
+  fi
+  grep -F 'project postureproj is local-only' "$err" >/dev/null \
+    || fail "seed did not explain the local-only external checkout refusal: $(cat "$err")"
+
+  # An unregistered project has no posture to read and no clone to read one
+  # from, so registering a real working checkout for it is refused rather than
+  # silently defaulting to no-mistakes.
+  subhome="$TMP_ROOT/external-posture-unregistered-subhome"
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='posture domain' \
+    "$ROOT/bin/fm-home-seed.sh" posturemate2 "$subhome" "unlisted=$external" >/dev/null 2>"$err"; then
+    fail "seed registered an external checkout for an unregistered project"
+  fi
+  grep -F 'project unlisted has no record in' "$err" >/dev/null \
+    || fail "seed did not explain the unregistered external checkout refusal: $(cat "$err")"
+  pass "home seeding refuses local-only and unregistered external checkouts"
+}
+
+test_home_seed_refuses_uninitialized_no_mistakes_external_checkout() {
+  local home subhome external err fakebin log
+  home="$TMP_ROOT/external-nm-home"
+  subhome="$TMP_ROOT/external-nm-subhome"
+  err="$TMP_ROOT/external-nm.err"
+  log="$TMP_ROOT/external-nm-no-mistakes.log"
+  external=$(make_external_checkout_fixture "$home" nmproj no-mistakes)
+  fakebin=$(make_recording_no_mistakes "$TMP_ROOT/external-nm-fake")
+  : > "$log"
+
+  if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_HOME="$home" \
+    FM_SECONDMATE_CHARTER='nm domain' \
+    "$ROOT/bin/fm-home-seed.sh" nmmate "$subhome" "nmproj=$external" >/dev/null 2>"$err"; then
+    fail "seed initialized a preexisting external checkout for no-mistakes"
+  fi
+  grep -F 'refusing to mutate preexisting clone' "$err" >/dev/null \
+    || fail "seed did not explain the uninitialized external checkout refusal: $(cat "$err")"
+  [ ! -s "$log" ] || fail "seed ran no-mistakes against the captain's external checkout"
+  [ ! -f "$external/.no-mistakes-init" ] || fail "seed mutated the external checkout"
+  assert_present "$external/UNCOMMITTED.txt" "seed disturbed uncommitted work in the external checkout"
+
+  # Once the captain has initialized it themselves, the same seed succeeds and
+  # still runs nothing against the checkout.
+  git -C "$external" remote add no-mistakes "$TMP_ROOT/remotes/$(basename "$external")-nm.git"
+  PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_HOME="$home" \
+    FM_SECONDMATE_CHARTER='nm domain' \
+    "$ROOT/bin/fm-home-seed.sh" nmmate "$subhome" "nmproj=$external" >/dev/null 2>"$err" \
+    || fail "seed refused an already-initialized external no-mistakes checkout: $(cat "$err")"
+  [ ! -s "$log" ] || fail "seed ran no-mistakes against an initialized external checkout"
+  [ ! -f "$external/.no-mistakes-init" ] || fail "seed mutated an initialized external checkout"
+  assert_grep "existing checkout at $external" "$subhome/data/projects.md" \
+    "seed did not record the initialized external checkout"
+  pass "home seeding refuses an uninitialized external no-mistakes checkout and leaves an initialized one untouched"
+}
+
+# The load-bearing invariant: retiring a secondmate that REGISTERED an existing
+# checkout must leave that checkout byte-identical, including its uncommitted
+# work, even when the retirement is forced and discards child work that ran in
+# worktrees OF that checkout.
+test_secondmate_teardown_preserves_registered_external_checkout() {
+  local home subhome external childwt fakebin log before after
+  home="$TMP_ROOT/external-teardown-home"
+  subhome="$TMP_ROOT/external-teardown-subhome"
+  childwt="$TMP_ROOT/external-teardown-child-worktree"
+  external=$(make_external_checkout_fixture "$home" teardownproj direct-PR)
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='teardown domain' FM_SECONDMATE_SCOPE='teardown domain work' \
+    "$ROOT/bin/fm-home-seed.sh" tdmate "$subhome" "teardownproj=$external" >/dev/null \
+    || fail "seed refused the external checkout under test"
+
+  # A crewmate of that mate worked in a disposable worktree OF the checkout.
+  git -C "$external" worktree add --quiet -b external-child "$childwt"
+  mkdir -p "$subhome/state"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$childwt
+project=$external
+harness=echo
+kind=ship
+mode=direct-PR
+yolo=off
+EOF
+  cat > "$home/state/tdmate.meta" <<EOF
+window=firstmate:fm-tdmate
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=teardownproj
+EOF
+  before=$(checkout_fingerprint "$external")
+  fakebin=$(make_fake_tmux "$TMP_ROOT/external-teardown-fake")
+  log="$TMP_ROOT/external-teardown-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/external-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" tdmate >/dev/null 2>&1; then
+    fail "teardown retired a secondmate that still had in-flight child work"
+  fi
+  after=$(checkout_fingerprint "$external")
+  [ "$before" = "$after" ] || fail "a refused teardown changed the registered external checkout"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/external-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" tdmate --force >/dev/null 2>/dev/null \
+    || fail "forced teardown failed to retire a secondmate with a registered external checkout"
+
+  [ ! -d "$subhome" ] || fail "forced teardown did not remove the retired secondmate home"
+  [ ! -d "$childwt" ] || fail "forced teardown did not discard the child worktree"
+  after=$(checkout_fingerprint "$external")
+  [ "$before" = "$after" ] || fail "forced teardown mutated the registered external checkout"
+  assert_present "$external/UNCOMMITTED.txt" "forced teardown removed uncommitted work from the external checkout"
+  assert_grep 'captain work in progress' "$external/UNCOMMITTED.txt" "forced teardown rewrote uncommitted work"
+  pass "retiring a secondmate leaves its registered external checkout byte-identical"
+}
+
+# The same discard path must refuse outright when a recorded child worktree IS a
+# repository's own working checkout rather than a disposable task worktree.
+# `git worktree list` reports the main working tree too, so without this the
+# registered-worktree check alone would authorize removing it.
+test_force_teardown_refuses_removing_a_repositorys_own_checkout() {
+  local home subhome external fakebin log err before after
+  home="$TMP_ROOT/external-mainwt-home"
+  subhome="$TMP_ROOT/external-mainwt-subhome"
+  err="$TMP_ROOT/external-mainwt.err"
+  external=$(make_external_checkout_fixture "$home" mainwtproj direct-PR)
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='main worktree domain' FM_SECONDMATE_SCOPE='main worktree work' \
+    "$ROOT/bin/fm-home-seed.sh" mwmate "$subhome" "mainwtproj=$external" >/dev/null \
+    || fail "seed refused the external checkout under test"
+  mkdir -p "$subhome/state"
+  cat > "$subhome/state/child.meta" <<EOF
+window=firstmate:fm-child
+worktree=$external
+project=$external
+harness=echo
+kind=ship
+mode=direct-PR
+yolo=off
+EOF
+  cat > "$home/state/mwmate.meta" <<EOF
+window=firstmate:fm-mwmate
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=mainwtproj
+EOF
+  before=$(checkout_fingerprint "$external")
+  fakebin=$(make_fake_tmux "$TMP_ROOT/external-mainwt-fake")
+  log="$TMP_ROOT/external-mainwt-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/external-mainwt-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" mwmate --force >/dev/null 2>"$err"; then
+    fail "forced teardown accepted a repository's own checkout as a discardable child worktree"
+  fi
+  grep -F "is a repository's own working checkout" "$err" >/dev/null \
+    || fail "forced teardown did not explain the working-checkout refusal: $(cat "$err")"
+  after=$(checkout_fingerprint "$external")
+  [ "$before" = "$after" ] || fail "the refused forced teardown still mutated the checkout"
+  assert_present "$external/UNCOMMITTED.txt" "the refused forced teardown removed uncommitted work"
+  assert_present "$subhome" "the refused forced teardown removed the home it refused to clean"
+  pass "forced teardown refuses to discard a repository's own working checkout"
+}
+
 test_home_seed_refuses_registry_delimiter_home() {
   local home subhome err
   home="$TMP_ROOT/delimiter-home"
@@ -3132,6 +3475,15 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
+test_home_seed_registers_external_checkout_without_cloning
+test_home_seed_mixes_cloned_and_external_projects
+test_home_seed_refuses_duplicate_project_entries
+test_home_seed_refuses_unsafe_external_checkouts
+test_home_seed_refuses_external_checkout_inside_the_secondmate_home
+test_home_seed_refuses_unregistered_and_local_only_external_checkouts
+test_home_seed_refuses_uninitialized_no_mistakes_external_checkout
+test_secondmate_teardown_preserves_registered_external_checkout
+test_force_teardown_refuses_removing_a_repositorys_own_checkout
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

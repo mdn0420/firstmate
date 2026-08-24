@@ -2,13 +2,22 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+#   fm-home-seed.sh <id> <home|-> {<project>[=<checkout-path>]...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". A bare <project> is cloned
 #       from the active home into the secondmate home's projects/ directory.
+#       <project>=<absolute-checkout-path> instead REGISTERS an existing checkout:
+#       nothing is cloned, nothing is created under the home's projects/, and the
+#       home's data/projects.md records where that checkout lives so every spawn
+#       can be pointed at it. The two forms may be mixed freely, but a project
+#       name may appear only once, so one project is never both. A registered
+#       checkout is never created, moved, refreshed, or removed by firstmate: it
+#       lives outside the home, so retiring the home leaves it untouched, and the
+#       automatic clone sweep never sees it because that sweep only walks
+#       projects/. bin/fm-project-spec-lib.sh owns the accepted entry shape.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
 #       subject is the firstmate repo itself; it is mutually exclusive with a
@@ -59,9 +68,11 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-project-spec-lib.sh
+. "$SCRIPT_DIR/fm-project-spec-lib.sh"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>[=<checkout-path>]...|--no-projects}" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -394,6 +405,78 @@ validate_project_destination() {
   printf '%s\n' "$abs_dst"
 }
 
+# Validate an EXTERNAL checkout named as <project>=<absolute-path> and print its
+# canonical path. Nothing here creates, moves, or writes anything: an external
+# checkout is the captain's own working copy, and registering it must never be
+# able to disturb it. The boundary checks keep a registered checkout strictly
+# outside every directory firstmate is allowed to remove, so retiring the home
+# - forced or not - can never reach it. The checkout must also be a
+# repository's own MAIN working checkout, not a linked worktree: a linked
+# worktree's git-dir differs from its git-common-dir, and fm-teardown.sh's
+# child_worktree_is_main_working_tree() guard only recognizes the main
+# working tree shape as a protected checkout, so a registered linked worktree
+# would not be shielded from forced teardown's rm -rf.
+validate_external_checkout() {
+  local home=$1 project=$2 path=$3 abs_path abs_home abs_active_home abs_root top abs_top
+  local gitdir commondir abs_gitdir abs_commondir
+  if [ -L "$path" ]; then
+    echo "error: project $project external checkout must not be a symlink: $path" >&2
+    return 1
+  fi
+  if [ ! -e "$path" ]; then
+    echo "error: project $project external checkout does not exist: $path" >&2
+    return 1
+  fi
+  if [ ! -d "$path" ]; then
+    echo "error: project $project external checkout is not a directory: $path" >&2
+    return 1
+  fi
+  abs_path=$(resolved_path "$path")
+  top=$(git -C "$abs_path" rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -z "$top" ]; then
+    echo "error: project $project external checkout is not a git repository: $path" >&2
+    return 1
+  fi
+  abs_top=$(resolved_path "$top")
+  if [ "$abs_top" != "$abs_path" ]; then
+    echo "error: project $project external checkout must be a repository root, not a subdirectory of $abs_top: $path" >&2
+    return 1
+  fi
+  abs_active_home=$(resolved_path "$FM_HOME")
+  abs_root=$(resolved_path "$FM_ROOT")
+  # The secondmate home is only known once it is resolved, so the early
+  # pre-flight pass runs with an empty home and the post-resolution pass adds
+  # this check. Both passes run before anything is registered.
+  if [ -n "$home" ]; then
+    abs_home=$(resolved_path "$home")
+    if [ "$abs_path" = "$abs_home" ] || path_is_ancestor_of "$abs_home" "$abs_path" || path_is_ancestor_of "$abs_path" "$abs_home"; then
+      echo "error: project $project external checkout must be outside the secondmate home $abs_home: $path" >&2
+      return 1
+    fi
+  fi
+  if [ "$abs_path" = "$abs_active_home" ] || path_is_ancestor_of "$abs_active_home" "$abs_path" || path_is_ancestor_of "$abs_path" "$abs_active_home"; then
+    echo "error: project $project external checkout must be outside the active firstmate home $abs_active_home: $path" >&2
+    return 1
+  fi
+  if [ "$abs_path" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_path" || path_is_ancestor_of "$abs_path" "$abs_root"; then
+    echo "error: project $project external checkout must be outside the firstmate repo $abs_root: $path" >&2
+    return 1
+  fi
+  gitdir=$(cd "$abs_path" && git rev-parse --git-dir 2>/dev/null || true)
+  commondir=$(cd "$abs_path" && git rev-parse --git-common-dir 2>/dev/null || true)
+  if [ -z "$gitdir" ] || [ -z "$commondir" ]; then
+    echo "error: project $project external checkout is not a git repository: $path" >&2
+    return 1
+  fi
+  abs_gitdir=$(cd "$abs_path" && cd "$gitdir" 2>/dev/null && pwd -P || true)
+  abs_commondir=$(cd "$abs_path" && cd "$commondir" 2>/dev/null && pwd -P || true)
+  if [ -z "$abs_gitdir" ] || [ -z "$abs_commondir" ] || [ "$abs_gitdir" != "$abs_commondir" ]; then
+    echo "error: project $project external checkout must be a repository's own main working checkout, not a linked worktree: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$abs_path"
+}
+
 normalize_origin_url() {
   local repo=$1 url=$2 prefix
   case "$url" in
@@ -526,6 +609,27 @@ EOF
   git clone --quiet "$url" "$dst"
 }
 
+# Pre-flight for an external entry, run before anything is created. It repeats
+# the registered-checkout boundary checks and additionally requires this home to
+# already carry a registry record for the project, because there is no clone to
+# read a posture from and silently defaulting a real working checkout to
+# no-mistakes is exactly the wrong failure.
+validate_seed_external_project() {
+  local home=$1 project=$2 path=$3 mode
+  validate_external_checkout "$home" "$project" "$path" >/dev/null || return 1
+  registry_line_for_project "$project" >/dev/null || {
+    echo "error: project $project has no record in $DATA/projects.md; register the project before seeding an existing checkout for it" >&2
+    return 1
+  }
+  read -r mode _ <<EOF
+$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$FM_ROOT/bin/fm-project-mode.sh" "$project")
+EOF
+  if [ "$mode" = local-only ]; then
+    echo "error: project $project is local-only; secondmate routes support only no-mistakes and direct-PR projects" >&2
+    return 1
+  fi
+}
+
 validate_seed_project() {
   local project=$1 src mode url
   src="$PROJECTS/$project"
@@ -558,6 +662,9 @@ seed_exit_cleanup() {
   seed_rollback
   seed_registry_lock_release
 }
+SEED_PROJECT_SPECS=()
+SEED_PROJECT_NAMES=()
+SEED_PROJECT_EXTERNALS=()
 SEED_HOME=
 SEED_HOME_ACQUIRED=0
 SEED_HOME_CREATED=0
@@ -721,11 +828,12 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today names
-  shift
+  local home=$1 sub_reg tmp project external line today names i
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
-  names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
+  names=
+  [ "${#SEED_PROJECT_NAMES[@]}" -eq 0 ] \
+    || names=$(printf '%s\n' "${SEED_PROJECT_NAMES[@]}" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
   if [ -f "$sub_reg" ]; then
     awk -v names="$names" '
       BEGIN {
@@ -738,10 +846,17 @@ sync_project_registry() {
     : > "$tmp"
   fi
   today=$(date +%F)
-  for project in "$@"; do
+  for ((i = 0; i < ${#SEED_PROJECT_NAMES[@]}; i++)); do
+    project=${SEED_PROJECT_NAMES[$i]}
+    external=${SEED_PROJECT_EXTERNALS[$i]}
     line=$(registry_line_for_project "$project" || true)
     if [ -z "$line" ]; then
       line="- $project - cloned project (added $today)"
+    fi
+    # An external entry rewrites its record every seed, so the note stays a
+    # single truthful copy rather than accumulating one per re-seed.
+    if [ -n "$external" ]; then
+      line="$line NOT cloned under projects/: work runs against the existing checkout at $external (pass that absolute path to every spawn; the automatic clone sweep only walks projects/, so refresh it explicitly with bin/fm-fleet-sync.sh $external). Never delete, reset, or clean it."
     fi
     printf '%s\n' "$line" >> "$tmp"
   done
@@ -749,15 +864,23 @@ sync_project_registry() {
 }
 
 initialize_no_mistakes_project() {
-  local home=$1 project=$2 created=$3 mode dst
+  local home=$1 project=$2 created=$3 external=${4:-} mode dst
   mode=$(project_mode_in_home "$home" "$project")
   [ "$mode" = no-mistakes ] || return 0
-  dst=$(validate_project_destination "$home" "$project") || return 1
+  if [ -n "$external" ]; then
+    dst=$external
+  else
+    dst=$(validate_project_destination "$home" "$project") || return 1
+  fi
   if git -C "$dst" remote get-url no-mistakes >/dev/null 2>&1; then
     return 0
   fi
   if [ "$created" != 1 ]; then
-    echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
+    if [ -n "$external" ]; then
+      echo "error: registered project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone. Initialize that checkout yourself, or register the project as direct-PR" >&2
+    else
+      echo "error: seeded project $project at $dst is not initialized for no-mistakes; refusing to mutate preexisting clone" >&2
+    fi
     return 1
   fi
   command -v no-mistakes >/dev/null 2>&1 || {
@@ -848,7 +971,7 @@ refuse_projectful_projectless_charter() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local id=$1 requested_home=$2 requested_abs home projects_csv project external project_dst charter_summary charter_scope i
   local no_projects=0 arg
   local filtered=()
   shift 2
@@ -871,6 +994,17 @@ seed_home() {
   else
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
   fi
+  # The original specs stay intact for the charter scaffold, so the generated
+  # charter can state which entries are registered checkouts rather than clones.
+  SEED_PROJECT_SPECS=("$@")
+  SEED_PROJECT_NAMES=()
+  SEED_PROJECT_EXTERNALS=()
+  if [ $# -gt 0 ]; then
+    fm_project_spec_parse_list "$@" \
+      || { echo "error: $FM_PROJECT_SPEC_ERROR" >&2; return 1; }
+    SEED_PROJECT_NAMES=("${FM_PROJECT_SPEC_NAMES[@]}")
+    SEED_PROJECT_EXTERNALS=("${FM_PROJECT_SPEC_EXTERNALS[@]}")
+  fi
 
   mkdir -p "$STATE" || return 1
   SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
@@ -882,8 +1016,14 @@ seed_home() {
   if [ -n "${FM_SECONDMATE_CLAUDE_CONFIG_DIR:-}" ]; then
     validate_claude_config_dir_input "$FM_SECONDMATE_CLAUDE_CONFIG_DIR" || return 1
   fi
-  for project in "$@"; do
-    validate_seed_project "$project"
+  for ((i = 0; i < ${#SEED_PROJECT_NAMES[@]}; i++)); do
+    project=${SEED_PROJECT_NAMES[$i]}
+    external=${SEED_PROJECT_EXTERNALS[$i]}
+    if [ -n "$external" ]; then
+      validate_seed_external_project "" "$project" "$external" || return 1
+    else
+      validate_seed_project "$project"
+    fi
   done
 
   SEED_ROLLBACK_ACTIVE=1
@@ -927,6 +1067,13 @@ seed_home() {
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
   validate_existing_parent_binding "$home" || return 1
+  # Re-check every registered checkout now that the home is resolved, so no
+  # external entry can overlap the home this seed is about to own.
+  for ((i = 0; i < ${#SEED_PROJECT_NAMES[@]}; i++)); do
+    external=${SEED_PROJECT_EXTERNALS[$i]}
+    [ -n "$external" ] || continue
+    validate_external_checkout "$home" "${SEED_PROJECT_NAMES[$i]}" "$external" >/dev/null || return 1
+  done
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
     if [ -f "$SEED_PARENT_BRIEF" ]; then
@@ -961,7 +1108,7 @@ seed_home() {
     if [ "$no_projects" -eq 1 ]; then
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
     else
-      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "${SEED_PROJECT_SPECS[@]}"
     fi
     SEED_PARENT_BRIEF_CREATED=1
   fi
@@ -980,13 +1127,24 @@ seed_home() {
     return 1
   }
 
-  for project in "$@"; do
+  # A registered checkout is skipped here entirely: it is neither cloned nor
+  # given a destination under the home, so the rollback ledger never names it
+  # and nothing in this seed can create or remove it.
+  for ((i = 0; i < ${#SEED_PROJECT_NAMES[@]}; i++)); do
+    project=${SEED_PROJECT_NAMES[$i]}
+    [ -z "${SEED_PROJECT_EXTERNALS[$i]}" ] || continue
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
     clone_project "$project" "$home"
   done
-  sync_project_registry "$home" "$@"
-  for project in "$@"; do
+  sync_project_registry "$home"
+  for ((i = 0; i < ${#SEED_PROJECT_NAMES[@]}; i++)); do
+    project=${SEED_PROJECT_NAMES[$i]}
+    external=${SEED_PROJECT_EXTERNALS[$i]}
+    if [ -n "$external" ]; then
+      initialize_no_mistakes_project "$home" "$project" 0 "$external"
+      continue
+    fi
     project_dst=$(validate_project_destination "$home" "$project") || return 1
     if seed_project_was_created "$project_dst"; then
       initialize_no_mistakes_project "$home" "$project" 1
@@ -997,7 +1155,10 @@ seed_home() {
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
-  projects_csv=$(join_projects "$@")
+  # The registry's projects: field stays a plain name list for both forms; the
+  # home's own data/projects.md owns where each project actually lives.
+  projects_csv=""
+  [ "${#SEED_PROJECT_NAMES[@]}" -eq 0 ] || projects_csv=$(join_projects "${SEED_PROJECT_NAMES[@]}")
   # Durable record of this home's route to its parent, written once here next
   # to the identity marker: the cleanup check in fm-teardown.sh reads it so a
   # restart that drops the launch-time FM_PUBLIC_FOLLOWUP_PRIMARY_HOME prefix

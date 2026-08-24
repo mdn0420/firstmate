@@ -959,6 +959,13 @@ families_for_changed_path() {
     bin/fm-stow-cascade.sh)
       printf '%s\n' secondmate
       ;;
+    bin/fm-project-spec-lib.sh)
+      # The seed-entry shape is shared by the charter scaffold and the local
+      # home seed, and an external entry's whole point is that teardown cannot
+      # reach it, so bin/fm-teardown.sh's family is selected too.
+      printf '%s\n' secondmate
+      printf '%s\n' pr-forge
+      ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
     bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
