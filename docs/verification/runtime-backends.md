@@ -233,6 +233,20 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+The claude row was re-established on 2026-08-24 after that adapter stopped passing an autonomy flag, so it now reflects a worker running under its own installation's configured permission mode rather than a bypass:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=claude tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.241 (Claude Code)): the doorbell reached a real worker, which acted and acked with the mv
+ok - live steering-inbox doorbell guard: 1 harness(es) honored the doorbell contract
+```
+
+The other harnesses' rows above are unaffected because their launch commands did not change.
+[`docs/verification/claude-worker-permissions.md`](claude-worker-permissions.md) owns the permission evidence itself.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

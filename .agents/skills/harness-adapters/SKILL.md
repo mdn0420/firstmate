@@ -188,8 +188,16 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+| Autonomy | No firstmate-chosen override is passed. Claude is the one verified adapter that DEFERS: the worker runs on whatever `permissions.defaultMode` its own config store sets, so that store's sandbox and auto-mode classifier govern it rather than being discarded at launch. (Pi also passes no flag, but only because it has no permission system to defer to.) `bin/fm-spawn.sh` forwards `CLAUDE_CONFIG_DIR`, so a worker bound to another store inherits THAT store's trust boundary. A task needing a different posture passes a raw launch command to `fm-spawn`, which changes that one spawn only. |
+
+An unattended worker is safe under a classifier because a `soft_deny` verdict REFUSES rather than prompting.
+Verified empirically 2026-08-24 on Claude Code 2.1.241, both from a built-in rule and from a custom one: the blocked call returns a tool error beginning `Permission for this action was denied by the Claude Code auto mode classifier`, the pane stays responsive, and the worker keeps working or reports the refusal.
+No permission dialog appears, so supervision never reads a classifier denial as a wedged pane.
+A worker that cannot proceed without the refused capability stops and explains, which reaches firstmate as an ordinary blocker.
+[`docs/verification/claude-worker-permissions.md`](../../../docs/verification/claude-worker-permissions.md) owns the commands, output, and refresh procedure.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
+This trust dialog is independent of the autonomy flag: it appears on a fresh worktree either way (verified 2026-08-24, Claude Code 2.1.241), so dropping the flag neither introduced nor removed it.
 After every spawn, peek the pane within about 20 seconds.
 If such a dialog is showing, accept it from an active firstmate session using `FM_HOME=<this-firstmate-home> bin/fm-send.sh <window> --key Enter`, or the choice the dialog requires, unless `FM_HOME` is already set to the active firstmate home; verify the brief started processing.
 

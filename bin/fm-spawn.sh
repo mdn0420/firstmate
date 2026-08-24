@@ -107,7 +107,11 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters, and the per-spawn way to launch a claude worker on a permission
+#   posture other than its own installation's configured default (pass the
+#   template you want, including any autonomy flag; the placeholders below are
+#   still substituted). It applies to that one spawn and changes no default.
+#   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -1132,7 +1136,18 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    #
+    # This template carries NO autonomy flag, and that absence is deliberate: do
+    # not add --dangerously-skip-permissions, --permission-mode, or any other
+    # firstmate-chosen permission override back to it. The worker runs on whatever
+    # permission mode its own installation configures, so that store's sandbox and
+    # auto-mode classifier govern it instead of being discarded at launch, and the
+    # CLAUDE_CONFIG_DIR forwarding below carries a differently-bound worker onto
+    # THAT store's trust boundary. A task that genuinely needs the old bypass
+    # passes a raw launch command (the escape hatch below), which changes that one
+    # spawn only. The harness-adapters skill owns the verified refusal behavior an
+    # unattended worker depends on.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -1152,10 +1167,11 @@ launch_template() {
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
     # session. --always-approve auto-approves every tool execution (verified: the
     # crewmate runs fully autonomously, no permission gate), which an unattended
-    # crewmate needs; it is the targeted equivalent of claude's
-    # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
-    # launch command - it is a Stop-event hook installed below (global hook +
-    # per-task pointer), so the template is identical for ship/scout/secondmate.
+    # crewmate needs. grok has no per-installation permission default of its own
+    # to defer to, so unlike claude it still carries an explicit autonomy flag.
+    # grok's turn-end signal does NOT ride the launch command - it is a Stop-event
+    # hook installed below (global hook + per-task pointer), so the template is
+    # identical for ship/scout/secondmate.
     grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
@@ -1202,7 +1218,7 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
+  *' '*)  # raw launch command (unverified-adapter and per-spawn permission escape hatch)
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
