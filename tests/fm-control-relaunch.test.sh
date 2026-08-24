@@ -26,7 +26,11 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+
 CONTROL="$ROOT/bin/fm-control.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
@@ -295,6 +299,53 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# arm_merge_poll <case-dir> <id> <url>: record the PR and arm its merge poll
+# through the real entry point, with gh and the guard kept out of the fakebin
+# the relaunch itself runs against.
+arm_merge_poll() {
+  local dir=$1 id=$2 url=$3
+  mkdir -p "$dir/prbin" "$dir/prroot/bin"
+  cat > "$dir/prbin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
+esac
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/prroot/bin/fm-guard.sh"
+  chmod 0700 "$dir/prbin/gh" "$dir/prroot/bin/fm-guard.sh"
+  env PATH="$dir/prbin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/prroot" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" "$url"
+}
+
+# A relaunch must not disarm the task's merge poll.
+# The replacement record ends with control_relaunch_tx, so that key lands after
+# pr=, and the poll then stopped validating its own identity: the merge went
+# unreported, and because a silent poll looks exactly like a PR that has not
+# merged yet, nothing said so. The PR values surviving the rewrite is not the
+# property that matters here - the poll still being bound to them is.
+test_relaunch_keeps_an_armed_merge_poll_armed() {
+  local dir out rc url
+  url=https://github.com/example/repo/pull/31
+  dir=$(new_case armed-poll rl31)
+  add_ship_task "$dir" rl31 claude
+  arm_merge_poll "$dir" rl31 "$url" >/dev/null 2>&1 \
+    || fail "the merge poll fixture could not be armed"
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl31 "$PR_POLL" \
+    || fail "the merge poll was not armed to begin with"
+
+  out=$(run_control "$dir" rl31 relaunch --note "picking the PR back up"); rc=$?
+  expect_code 0 "$rc" "a relaunch over an armed merge poll should succeed"$'\n'"$out"
+
+  # Without this the case could pass while never exercising the append at all.
+  [ -n "$(meta_field "$dir" rl31 control_relaunch_tx)" ] \
+    || fail "the replacement record did not carry its relaunch transaction key"
+  [ "$(meta_field "$dir" rl31 pr)" = "$url" ] || fail "the task PR must survive relaunch"
+
+  fm_pr_poll_artifacts_valid "$dir/home/state" rl31 "$PR_POLL" \
+    || fail "the relaunch left the merge poll unable to validate its own identity"
+  pass "fm-control relaunch: an armed merge poll stays armed across the replacement"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -1513,6 +1564,7 @@ test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
+test_relaunch_keeps_an_armed_merge_poll_armed
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state
