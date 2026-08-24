@@ -238,32 +238,33 @@ C_SURVIVOR_ORDER=$(printf '%s' "$C_ORDER" | tr ',' '\n' | grep -v "^$C_DOOMED_WS
 
 # One persistent background child of the pane's shell, started outside any
 # worktree so nothing reaps it, is enough to fail the proof on every sample.
-# Sent via the ATOMIC `pane run` (fm_backend_herdr_send_text_line's own
-# primitive, herdr.sh:2571) rather than a separate send-text + send-keys
-# enter pair. The two-step form is two independent CLI round trips with no
-# guarantee the Enter is processed only after the text lands; on a shared CI
-# runner that gap is exactly wide enough, often enough, for the Enter to
-# submit an empty line and strand the typed command unsubmitted forever -
-# indistinguishable from "the child just hasn't shown up yet" to the poll
-# loop below, which is why raising its budget (previously tried) never
-# helped: nothing was ever going to appear. `pane run` types and submits in
-# one call, closing that gap.
-lab pane run "$C_DOOMED_PANE" 'cd / && sleep 3000 &' >/dev/null \
+#
+# Send `cd /` and the child as TWO SEPARATE SIMPLE COMMANDS. Backgrounding a
+# compound list (`cd / && sleep 3000 &`) runs it in a subshell, and whether
+# that subshell collapses into the final command is shell-dependent: dash and
+# zsh exec through it, bash does not and leaves the shell parenting a `bash`
+# subshell instead. Herdr picks the pane shell from $SHELL, so this varies by
+# host, not by code: a macOS pane is zsh and a bare container pane is sh (both
+# collapse, both pass), while GitHub Actions exports SHELL=/bin/bash and the
+# child is a subshell. A lone `sleep 3000 &` is a simple command and parents
+# the same way under every one of those shells.
+lab pane run "$C_DOOMED_PANE" 'cd /' >/dev/null \
+  || fail 'could not move the Part C doomed pane out of the worktree'
+lab pane run "$C_DOOMED_PANE" 'sleep 3000 &' >/dev/null \
   || fail 'could not send the Part C persistent-child command'
-# The wall-clock deadline below is retained as a generous margin for slow
-# fork/exec on a loaded runner; it is no longer the primary defense.
+# Generous margin for slow fork/exec on a loaded runner.
 C_SHELL_PID=
 C_CHILD_STABLE=0
 C_CHILD_DEADLINE=$((SECONDS + 120))
 while [ "$SECONDS" -lt "$C_CHILD_DEADLINE" ]; do
   C_SHELL_PID=$(lab pane process-info --pane "$C_DOOMED_PANE" 2>/dev/null \
     | jq -r '.result.process_info.shell_pid // empty' 2>/dev/null) || C_SHELL_PID=
-  if [ -n "$C_SHELL_PID" ] && ps -axo ppid=,comm= | awk -v parent="$C_SHELL_PID" '
-    $1 == parent {
-      command = $2
-      sub(/^.*\//, "", command)
-      if (command == "sleep") found = 1
-    }
+  # Any direct child, regardless of name - this is exactly the condition the
+  # adapter's own idle-shell proof tests (fm_backend_herdr_pane_idle_shell_sample
+  # counts `$2 == shell` without inspecting the name). Matching on a specific
+  # command name would assert something stricter than the contract under test.
+  if [ -n "$C_SHELL_PID" ] && ps -axo ppid= | awk -v parent="$C_SHELL_PID" '
+    $1 == parent { found = 1 }
     END { exit(found ? 0 : 1) }
   '; then
     C_CHILD_STABLE=$((C_CHILD_STABLE + 1))
@@ -274,7 +275,7 @@ while [ "$SECONDS" -lt "$C_CHILD_DEADLINE" ]; do
   fi
   sleep 0.1
 done
-[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent sleep child process'
+[ "$C_CHILD_STABLE" -ge 2 ] || fail 'the Part C doomed pane never acquired a stable persistent child process'
 
 C_CALL_LOG="$TMP_ROOT/call-c.log"
 C_FOCUS_SAMPLES="$TMP_ROOT/focus-c.samples"
