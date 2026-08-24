@@ -77,12 +77,14 @@ harness_version() {  # <binary>
   "$1" --version 2>/dev/null | head -1 || printf 'version-unknown'
 }
 
-# Launch <name> idle with its unattended-autonomy flags (the same posture
-# bin/fm-spawn.sh uses), so the doorbell-triggered shell actions need no
-# interactive approval.
+# Launch <name> idle on the same posture bin/fm-spawn.sh uses, so this guard
+# proves the doorbell against what actually ships. Most harnesses need an
+# explicit unattended-autonomy flag for the doorbell-triggered shell actions to
+# run without interactive approval; claude deliberately carries none, because it
+# defers to the permission mode its own installation configures.
 launch_cmd() {  # <name>
   case "$1" in
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude' ;;
     codex) printf '%s' 'codex --dangerously-bypass-approvals-and-sandbox' ;;
     opencode) printf '%s' "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode" ;;
     pi|pi-signed) printf '%s' "$1" ;;
