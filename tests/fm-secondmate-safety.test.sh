@@ -1141,8 +1141,10 @@ test_home_seed_refuses_unsafe_external_checkouts() {
   err="$TMP_ROOT/external-unsafe.err"
   mkdir -p "$TMP_ROOT/external-unsafe-plain" "$external/subdir"
   ln -s "$external" "$TMP_ROOT/external-unsafe-link"
+  git -C "$external" worktree add --quiet -b external-unsafe-linked-worktree-branch \
+    "$TMP_ROOT/external-unsafe-linked-worktree" >/dev/null
 
-  for case_name in empty relative missing traversal symlink non-git subdirectory inside-active-home inside-repo; do
+  for case_name in empty relative missing traversal symlink non-git subdirectory inside-active-home inside-repo linked-worktree; do
     subhome="$TMP_ROOT/external-unsafe-subhome-$case_name"
     case "$case_name" in
       # An unset shell variable expanding to nothing is the realistic way to
@@ -1156,6 +1158,7 @@ test_home_seed_refuses_unsafe_external_checkouts() {
       subdirectory) spec="unsafeproj=$external/subdir"; expected='must be a repository root' ;;
       inside-active-home) spec="unsafeproj=$home/projects/alpha"; expected='must be outside the active firstmate home' ;;
       inside-repo) spec="unsafeproj=$ROOT"; expected='must be outside the firstmate repo' ;;
+      linked-worktree) spec="unsafeproj=$TMP_ROOT/external-unsafe-linked-worktree"; expected='not a linked worktree' ;;
     esac
     if FM_HOME="$home" FM_SECONDMATE_CHARTER='unsafe domain' \
       "$ROOT/bin/fm-home-seed.sh" "unsafe$case_name" "$subhome" "$spec" >/dev/null 2>"$err"; then
@@ -1165,7 +1168,7 @@ test_home_seed_refuses_unsafe_external_checkouts() {
       || fail "seed did not explain the unsafe external checkout ($case_name): $(cat "$err")"
     [ ! -e "$subhome" ] || fail "seed created a subhome before refusing an unsafe external checkout ($case_name)"
   done
-  pass "home seeding refuses empty, relative, missing, traversing, symlinked, non-repository, nested, and in-home external checkouts"
+  pass "home seeding refuses empty, relative, missing, traversing, symlinked, non-repository, nested, in-home, and linked-worktree external checkouts"
 }
 
 test_home_seed_refuses_external_checkout_inside_the_secondmate_home() {

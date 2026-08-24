@@ -176,7 +176,8 @@ For `no-mistakes` projects, seeding initializes only projects newly cloned into 
 Name a project as `<project>=<absolute-checkout-path>` to REGISTER an existing checkout instead of cloning a second copy of it, which is the right shape when the captain already works in that clone and has not asked for a duplicate.
 Nothing is cloned and nothing is created under the home's `projects/`; the home's own `data/projects.md` records where that checkout lives, and every spawn for it takes that absolute path, exactly as `bin/fm-spawn.sh` has always accepted an arbitrary project directory.
 Both forms may be mixed in one list, but a project name may appear only once, so a project is never half cloned and half registered.
-A registered checkout must exist, be an ordinary directory rather than a symlink, be a git repository root, and sit outside this home, the secondmate home, and the firstmate repo; it must also already have a project registry record here, because there is no clone to read a delivery posture from and silently defaulting the captain's working copy to `no-mistakes` is the wrong failure.
+A registered checkout must exist, be an ordinary directory rather than a symlink, be a git repository root, be that repository's own main working checkout rather than a linked worktree, and sit outside this home, the secondmate home, and the firstmate repo; it must also already have a project registry record here, because there is no clone to read a delivery posture from and silently defaulting the captain's working copy to `no-mistakes` is the wrong failure.
+A linked worktree is refused because `bin/fm-teardown.sh`'s main-working-checkout guard does not recognize it as a protected checkout, so only a main working checkout is shielded from forced teardown's removal.
 
 Firstmate never creates, moves, refreshes, or removes a registered checkout.
 Two operator consequences follow, and both belong in the charter you write:

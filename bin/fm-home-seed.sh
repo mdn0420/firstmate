@@ -410,9 +410,15 @@ validate_project_destination() {
 # checkout is the captain's own working copy, and registering it must never be
 # able to disturb it. The boundary checks keep a registered checkout strictly
 # outside every directory firstmate is allowed to remove, so retiring the home
-# - forced or not - can never reach it.
+# - forced or not - can never reach it. The checkout must also be a
+# repository's own MAIN working checkout, not a linked worktree: a linked
+# worktree's git-dir differs from its git-common-dir, and fm-teardown.sh's
+# child_worktree_is_main_working_tree() guard only recognizes the main
+# working tree shape as a protected checkout, so a registered linked worktree
+# would not be shielded from forced teardown's rm -rf.
 validate_external_checkout() {
   local home=$1 project=$2 path=$3 abs_path abs_home abs_active_home abs_root top abs_top
+  local gitdir commondir abs_gitdir abs_commondir
   if [ -L "$path" ]; then
     echo "error: project $project external checkout must not be a symlink: $path" >&2
     return 1
@@ -454,6 +460,18 @@ validate_external_checkout() {
   fi
   if [ "$abs_path" = "$abs_root" ] || path_is_ancestor_of "$abs_root" "$abs_path" || path_is_ancestor_of "$abs_path" "$abs_root"; then
     echo "error: project $project external checkout must be outside the firstmate repo $abs_root: $path" >&2
+    return 1
+  fi
+  gitdir=$(cd "$abs_path" && git rev-parse --git-dir 2>/dev/null || true)
+  commondir=$(cd "$abs_path" && git rev-parse --git-common-dir 2>/dev/null || true)
+  if [ -z "$gitdir" ] || [ -z "$commondir" ]; then
+    echo "error: project $project external checkout is not a git repository: $path" >&2
+    return 1
+  fi
+  abs_gitdir=$(cd "$abs_path" && cd "$gitdir" 2>/dev/null && pwd -P || true)
+  abs_commondir=$(cd "$abs_path" && cd "$commondir" 2>/dev/null && pwd -P || true)
+  if [ -z "$abs_gitdir" ] || [ -z "$abs_commondir" ] || [ "$abs_gitdir" != "$abs_commondir" ]; then
+    echo "error: project $project external checkout must be a repository's own main working checkout, not a linked worktree: $path" >&2
     return 1
   fi
   printf '%s\n' "$abs_path"
