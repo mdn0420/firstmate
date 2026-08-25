@@ -78,8 +78,14 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS; observation is read-only
-#                          and one parent receipt suppresses repeats for that row
+#                          FM_SECONDMATE_WAKE_STALL_SECS and the mate showed no
+#                          positive evidence its loop will still reach that row.
+#                          Absorbing takes two independent affirmative readings -
+#                          an endpoint that reads exactly alive, plus the mate's
+#                          own report that it is working or waiting - so every
+#                          other reading surfaces (secondmate_wake_loop_evidence).
+#                          Observation is read-only and one parent receipt
+#                          suppresses repeats for that row
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -396,13 +402,62 @@ secondmate_oldest_queue_row() {  # <queue-path>
   ' "$queue" 2>/dev/null || true
 }
 
+# Positive evidence that a mate's wake loop will still reach its oldest row, so
+# an aged head row is one the mate has not consumed YET rather than one it will
+# never consume. Prints the evidence label and returns 0, or returns 1.
+#
+# Row age alone cannot separate those two claims, and reports the second while
+# observing the first. A mate makes a NEW row the head every time it drains, so
+# ordinary progress inside one long turn - and every revival of a stopped mate -
+# manufactures a fresh row key, defeats the per-row marker, and re-fires. A head
+# row can also be permanently unconsumable, such as a notice about the very wait
+# the mate is held on, and then age only measures how long the mate has been
+# legitimately parked.
+#
+# Absorbing therefore needs TWO independent affirmative readings, so no single
+# source can silence this alarm on its own:
+#   - the endpoint itself must read exactly alive. dead, missing, ambiguous,
+#     unreadable, and unverified all surface, which keeps the one occurrence that
+#     has ever mattered - a mate that is simply gone - and keeps a leftover busy
+#     record or an old hold from speaking for a mate that no longer exists.
+#   - the mate must also report that it is either working or waiting: a turn in
+#     flight through the semantic busy contract the rest of this watcher trusts
+#     (bin/fm-busy-lib.sh), a declared external wait or verified captain-held
+#     transfer, or an open decision or blocker that the primary already owns
+#     (fm-classify-lib.sh's status fold, which a later unrelated status line
+#     cannot mask).
+# Every other reading - idle, unknown, unreadable, an absent record, or a status
+# log that declares nothing - is not evidence and surfaces, because a missed real
+# stall costs more than a surviving false one.
+#
+# A mate that is alive and neither working nor waiting has gone quiet without
+# saying so, which is this alarm's true positive. A mate wedged inside an endless
+# turn stays owned by BUSY_TURN_MAX_SECS and the wedge timer, not by this check.
+secondmate_wake_loop_evidence() {  # <task> <meta>
+  local task=$1 meta=$2 status evidence=
+  [ "$(fm_backend_agent_alive "$(fm_backend_of_meta "$meta")" \
+    "$(fm_backend_target_of_meta "$meta")" 2>/dev/null)" = alive ] || return 1
+  status="$STATE/$task.status"
+  case "$(fm_busy_classify_meta "$meta" "$task" "$STATE")" in
+    busy*) evidence=working ;;
+  esac
+  if [ -z "$evidence" ] && status_is_paused_or_captain_held "$(last_status_line "$status")"; then
+    evidence=parked
+  fi
+  if [ -z "$evidence" ] && [ -f "$status" ] && [ -n "$(status_open_decisions "$status")" ]; then
+    evidence=held
+  fi
+  [ -n "$evidence" ] || return 1
+  printf '%s' "$evidence"
+}
+
 # Surface one durable parent check for one unchanged foreign row after its
 # bounded age. The primary marker and queued-key check make repeated watcher
 # cycles converge without a notification storm, while an empty queue removes
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason evidence
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -444,6 +499,15 @@ EOF
     fi
     [ "$(cat "$marker" 2>/dev/null || true)" = "$row_key" ] && continue
     [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ] && continue
+    # Read liveness only here, where the alarm would otherwise be published, so
+    # quiet and already-published rows still cost nothing. Absorbing takes the
+    # same triage_log-and-continue shape the duplicate merged PR poll result uses
+    # rather than enqueuing a no-change wake, and it writes no marker, so the row
+    # is judged again next poll and surfaces the moment the evidence stops holding.
+    if evidence=$(secondmate_wake_loop_evidence "$task" "$meta"); then
+      triage_log "absorbed secondmate wake-loop stall for $task ($evidence, row $seq, age ${age}s)"
+      continue
+    fi
     notify_key="secondmate-wake-loop-$task-$row_key"
     reason="check: secondmate wake-loop stalled: mate=$task row=$seq age=${age}s"
     queued=$(fm_wake_queued_keys check)
