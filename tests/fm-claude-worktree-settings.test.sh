@@ -79,6 +79,15 @@ SH
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'claude\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
+  # Ignore the seeded settings file on the worktree's own branch so an
+  # untracked .claude/settings.local.json never registers as uncommitted work
+  # under fm-spawn.sh's pooled-worktree cleanliness check. This must not
+  # depend on the host's own global gitignore (some machines already exclude
+  # this path by convention, which would hide a real regression here).
+  printf '.claude/settings.local.json\n' > "$wt/.gitignore"
+  git -C "$wt" add .gitignore
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'ignore local claude settings'
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
