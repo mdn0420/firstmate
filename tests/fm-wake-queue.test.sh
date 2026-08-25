@@ -236,6 +236,12 @@ test_drain_dedupes_obvious_duplicates() {
 # plain drain-and-handle turn that runs no other supervision script. It must warn
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire from a live watcher with a fresh beacon, so it never false-alarms.
+# The fake below answers only the window inventory, and in `session:window` form
+# rather than the `#{window_name}` the endpoint reader asks for, so the mate it
+# presents reads as gone. That is deliberate here: these cases pin publication
+# idempotence, quiet queues, and foreign-row byte stability, and a mate that is
+# gone is the shape that reaches publication at all. The liveness gate itself is
+# pinned by the two cases above.
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
   local dir state sub fakebin out row_before row_after stall_count
   dir=$(make_case secondmate-foreign-stall)
@@ -316,6 +322,128 @@ SH
   ! grep -F 'secondmate wake-loop stalled' "$dir/watch-healthy.out" >/dev/null \
     || fail "a healthy foreign queue produced a stall notification"
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
+}
+
+# A tmux fake that answers what the endpoint reader actually asks - the window
+# inventory in `#{window_name}` form and the pane's own current command - so a
+# mate can be presented as genuinely live or genuinely gone. The older fakes
+# above deliberately answer only the inventory question and stay untouched.
+write_stall_tmux_fake() {  # <bin-dir> <alive:yes|no>
+  local bin=$1 alive=$2
+  mkdir -p "$bin"
+  cat > "$bin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list-windows) [ "$alive" = yes ] && printf 'fm-mate\n' ;;
+  display-message)
+    case "\$*" in
+      *pane_current_command*) [ "$alive" = yes ] && printf 'claude\n' ;;
+      *pane_tty*) : ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$bin/tmux"
+}
+
+# One mate home whose oldest wake-queue row is already older than the stall
+# threshold, so every case below differs only in the liveness and activity the
+# mate presents.
+seed_aged_stall_case() {  # <dir> <alive:yes|no> <busy:busy|idle> [status-line...]
+  local dir=$1 alive=$2 busy=$3 state sub now
+  shift 3
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$state" "$sub/state" "$sub/data"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  now=$(date +%s)
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$((now - 600))" > "$sub/state/.wake-queue"
+  printf 'g1\n' > "$state/mate.busy-gen"
+  printf 'v1 gen=g1 seq=5 state=%s source=claude-hook event=UserPromptSubmit ts=%s\n' \
+    "$busy" "$now" > "$state/mate.busy-state"
+  if [ "$#" -gt 0 ]; then
+    printf '%s\n' "$@" > "$state/mate.status"
+    # The status log is seeded state, not a fresh report: prime its marker so the
+    # checkpoint cannot exit on that signal before the queue-stall tick runs and
+    # leave the assertions below vacuously satisfied.
+    prime_status_seen "$state" "$state/mate.status" \
+      || fail "could not prime the seeded mate status marker"
+  fi
+  write_stall_tmux_fake "$dir/fakebin" "$alive"
+}
+
+run_stall_checkpoint() {  # <dir>
+  local dir=$1
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_SECONDMATE_WAKE_STALL_SECS=60 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 3 \
+    > "$dir/watch.out" 2> "$dir/watch.err" || true
+}
+
+test_secondmate_stall_absorbs_a_live_working_or_waiting_mate() {
+  local case_no=0 label dir
+  # Row age alone cannot tell "not consumed yet" from "never will be": a mate
+  # makes a new row the head every time it drains, so progress inside one long
+  # turn re-keys the alarm, and a mate parked on a decision can hold a
+  # permanently unconsumable head row for hours. Each shape below is a mate that
+  # is demonstrably fine.
+  while [ "$case_no" -lt 4 ]; do
+    case_no=$((case_no + 1))
+    dir=$(make_case "secondmate-stall-live-$case_no")
+    case "$case_no" in
+      1) label='a turn in flight'
+         seed_aged_stall_case "$dir" yes busy ;;
+      2) label='a declared external wait'
+         seed_aged_stall_case "$dir" yes idle 'paused: awaiting an upstream release' ;;
+      3) label='a verified captain-held transfer'
+         seed_aged_stall_case "$dir" yes idle 'captain-held: handed to the captain' ;;
+      4) label='an open decision a later status line masks'
+         seed_aged_stall_case "$dir" yes idle \
+           'needs-decision [key=api-shape]: which shape?' 'working: an unrelated later line' ;;
+    esac
+    cp "$dir/secondmate/state/.wake-queue" "$dir/foreign-before"
+    run_stall_checkpoint "$dir"
+    ! grep -F 'secondmate wake-loop stalled' "$dir/watch.out" >/dev/null \
+      || fail "a live mate showing $label was reported as a stalled wake loop: $(cat "$dir/watch.out")"
+    ! grep -F 'secondmate-wake-loop-mate-' "$dir/state/.wake-queue" >/dev/null 2>&1 \
+      || fail "a live mate showing $label published a durable stall notification: $(cat "$dir/state/.wake-queue")"
+    [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+      || fail "absorbing $label recorded a publication marker, so a later death would be suppressed"
+    cmp -s "$dir/foreign-before" "$dir/secondmate/state/.wake-queue" \
+      || fail "absorbing $label changed the foreign queue row"
+  done
+  pass "an aged head row stays quiet while the mate is alive and either working or waiting"
+}
+
+test_secondmate_stall_surfaces_a_mate_that_is_gone_or_silently_quiet() {
+  local case_no=0 label dir
+  # The true positive, kept behind every reading that could otherwise speak for
+  # a mate that is no longer there.
+  while [ "$case_no" -lt 4 ]; do
+    case_no=$((case_no + 1))
+    dir=$(make_case "secondmate-stall-gone-$case_no")
+    case "$case_no" in
+      1) label='a mate whose endpoint is gone'
+         seed_aged_stall_case "$dir" no idle ;;
+      2) label='a dead mate behind a leftover busy record'
+         seed_aged_stall_case "$dir" no busy ;;
+      3) label='a dead mate behind an old captain hold and open decision'
+         seed_aged_stall_case "$dir" no idle 'needs-decision [key=api-shape]: which shape?' ;;
+      4) label='a live mate that went quiet without declaring anything'
+         seed_aged_stall_case "$dir" yes idle 'working: still going' ;;
+    esac
+    run_stall_checkpoint "$dir"
+    grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch.out" >/dev/null \
+      || fail "$label did not raise the stall alarm: $(cat "$dir/watch.out"); err=$(cat "$dir/watch.err")"
+    grep -F 'secondmate-wake-loop-mate-' "$dir/state/.wake-queue" >/dev/null \
+      || fail "$label raised the alarm without a durable record"
+  done
+  pass "an aged head row still surfaces for a mate that is gone or has quietly stopped"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1214,6 +1342,8 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_secondmate_stall_absorbs_a_live_working_or_waiting_mate
+test_secondmate_stall_surfaces_a_mate_that_is_gone_or_silently_quiet
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

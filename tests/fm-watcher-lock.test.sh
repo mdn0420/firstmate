@@ -724,7 +724,13 @@ test_arm_hup_cleans_child_and_temp_output() {
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 80
+  # Bash only runs a pending trap once its current foreground command returns,
+  # so a HUP landing just after the poll loop's FM_POLL=5 sleep starts is not
+  # handled until that sleep finishes; observed exit latency already reaches
+  # ~6s on an idle machine. An 8s ceiling (the former limit of 80) leaves too
+  # little slack under CI load and made this case flaky without ever pointing
+  # at a real hang - this test passes the instant the process exits either way.
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
