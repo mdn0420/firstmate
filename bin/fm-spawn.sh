@@ -170,6 +170,10 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __CLAUDESETTINGS__ optional `--settings <path>` naming state/<task-id>.claude-settings.json
+#                  (claude lifecycle hooks, written by this script; outside the worktree so the
+#                  repo's own .claude/settings.local.json is never opened). Empty when no
+#                  claude hook settings were written for this launch.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1162,7 +1166,7 @@ launch_template() {
     # passes a raw launch command (the escape hatch below), which changes that one
     # spawn only. The harness-adapters skill owns the verified refusal behavior an
     # unattended worker depends on.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude __MODELFLAG____EFFORTFLAG____CLAUDESETTINGS__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2357,6 +2361,9 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# Set only when claude hook settings are written below; consumed by the
+# __CLAUDESETTINGS__ substitution. Empty means this launch carries no --settings.
+CLAUDE_SETTINGS=
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -2426,17 +2433,26 @@ if [ "$KIND" != secondmate ]; then
       # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
-      mkdir -p "$WT/.claude"
+      #
+      # These settings are written OUTSIDE the worktree and handed to the agent
+      # on the launch line with --settings, the same shape as pi's -e extension.
+      # The repo's own .claude/settings.local.json is never opened, so a project
+      # that seeds one (permissions, plugins, MCP servers) keeps it byte-identical
+      # for the whole life of the task. --settings is an ADDITIONAL source that
+      # merges with the user/project/local settings claude already loads rather
+      # than replacing them, so firstmate's hooks and the project's own hooks are
+      # both in force (verified live, claude 2.1.245; see
+      # docs/verification/runtime-backends.md).
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      CLAUDE_SETTINGS="$STATE_REAL/$ID.claude-settings.json"
+      cat > "$CLAUDE_SETTINGS" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2797,6 +2813,11 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+# Empty unless the claude adapter wrote hook settings above, so a secondmate (which
+# installs no per-task hooks) and every other harness resolve the placeholder away.
+CLAUDESETTINGSFLAG=
+[ -z "$CLAUDE_SETTINGS" ] || CLAUDESETTINGSFLAG="--settings $(shell_quote "$CLAUDE_SETTINGS") "
+LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$CLAUDESETTINGSFLAG}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

@@ -198,13 +198,15 @@ fm_control_backend_state_verified() {  # <backend>
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
 # pointing at a retired generation. Prints zero or more absolute paths, one per
-# line: worktree-resident hook files and firstmate-owned state tokens only,
-# never a harness's own managed config.
+# line: firstmate-owned hook files and state tokens only, never a harness's own
+# managed config and never a file the project itself owns. claude's hook settings
+# live in state/ and reach the agent through --settings, so retiring them never
+# touches the repo's .claude/settings.local.json.
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
   local harness=${1-} wt=${2-} state=${3-} id=${4-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
+    claude) printf '%s\n' "$state/$id.claude-settings.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
     grok)

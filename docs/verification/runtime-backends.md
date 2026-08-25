@@ -981,3 +981,26 @@ Evidence produced 2026-08-23 on macOS 26.5.0 arm64, Node v24.14.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.84.1 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+## Claude per-task settings handoff
+
+`bin/fm-spawn.sh` hands a claude worker its lifecycle hooks on the launch line with `--settings <state>/<id>.claude-settings.json` instead of writing the task worktree's own `.claude/settings.local.json`.
+Three facts that only the real binary can answer were verified on 2026-08-25 against Claude Code 2.1.245 (macOS 26.5.0 arm64).
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-claude-settings-handoff-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.245 (Claude Code) puts firstmate's lifecycle hooks in force from --settings
+ok - claude 2.1.245 (Claude Code) merges --settings with the project's own settings rather than replacing them
+ok - claude 2.1.245 (Claude Code) leaves the project's .claude/settings.local.json byte-identical
+all fm-claude-settings-handoff-live-e2e checks passed against claude 2.1.245 (Claude Code)
+```
+
+The merge result is the load-bearing one.
+`--settings` is an ADDITIONAL source rather than a replacement for the user, project, and local scopes, so a hook the project registers on the same event still fires alongside firstmate's; were that ever to change, the handoff would silently disarm every project's own hooks for the life of a task.
+`--setting-sources` is a separate control over which of the three named scopes load and is not passed.
+
+The portable half - that a spawn writes nothing into the worktree, appends nothing to the project's `$GIT_DIR/info/exclude`, and hands over settings whose four hooks drive firstmate's own busy/idle lifecycle - is pinned with no harness in `tests/fm-claude-worktree-settings.test.sh`.
+Refresh this record from the live guard above after every Claude upgrade.
